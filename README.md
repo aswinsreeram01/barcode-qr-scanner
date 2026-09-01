@@ -20,8 +20,11 @@ a short suppression window has to elapse, or a different code has to be read.
 ## Features
 
 - Live camera scanning with an aligned crop region — only what is inside the frame is decoded
-- Hybrid decoding: the browser's native `BarcodeDetector` where available, a bundled
-  ZXing decoder everywhere else (so iOS Safari works too)
+- Fast hybrid decoding: the ML Kit-backed native `BarcodeDetector` on Android (fed
+  full-resolution frames straight from the video element), the zxing-cpp WebAssembly
+  decoder everywhere else — including iOS Safari. Rotated, tilted and inverted codes
+  read fine; a legacy JS decoder remains as a last-resort fallback
+- Continuous autofocus is requested where the camera supports it
 - Running count for the current session, plus a persistent scan list
 - Tap any row to copy it, or **Copy all** to grab the whole list in scan order
 - Flashlight toggle and camera switching, where the hardware supports it
@@ -34,8 +37,9 @@ QR Code, Data Matrix, Aztec, PDF417, Code 128, Code 39, Code 93, Codabar, ITF,
 EAN-8, EAN-13, UPC-A, UPC-E, GS1 DataBar.
 
 The exact set depends on the engine: native `BarcodeDetector` advertises its own list
-(Android Chrome covers all the common ones), the ZXing fallback covers the list above.
-The badge in the top-right shows which engine is running.
+(Android Chrome covers all the common ones); the wasm decoder covers the list above plus
+Micro QR, rMQR and DataBar Limited. The badge in the top-right shows which engine is
+running — Native, WASM, or ZXing JS.
 
 ## Requirements
 
@@ -62,7 +66,8 @@ so use the deployed GitHub Pages URL or a tunnel such as `cloudflared`/`ngrok`.
 index.html              markup
 css/styles.css          styles
 js/app.js               camera, scan loop, decoding, confirmation flow, history
-vendor/zxing.min.js     @zxing/library 0.21.3 UMD build (fallback decoder)
+vendor/zxing-wasm/      zxing-wasm 2.2.4 (zxing-cpp WebAssembly reader) — main decoder
+vendor/zxing.min.js     @zxing/library 0.21.3 UMD build (last-resort fallback)
 icon.svg                app icon
 manifest.webmanifest    PWA manifest
 .nojekyll               tells GitHub Pages to serve the files as-is
@@ -75,5 +80,7 @@ that branch. There is no build step.
 
 ## Licence
 
-MIT for the application code. `vendor/zxing.min.js` is
+MIT for the application code. `vendor/zxing-wasm/` is
+[zxing-wasm](https://github.com/Sec-ant/zxing-wasm) (MIT, wrapping Apache-2.0
+[zxing-cpp](https://github.com/zxing-cpp/zxing-cpp)); `vendor/zxing.min.js` is
 [@zxing/library](https://github.com/zxing-js/library), Apache-2.0.

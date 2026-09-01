@@ -1,10 +1,13 @@
 /* Barcode & QR scanner — rapid multi-scan, fully client-side.
- * Decoding: native BarcodeDetector when the browser has it, ZXing (vendored) otherwise. */
+ * Decoding: native BarcodeDetector on Android (ML Kit-backed), the zxing-cpp
+ * WebAssembly port everywhere else, with the old JS port as a last resort. */
 (function () {
   'use strict';
 
-  var SCAN_INTERVAL_MS = 90;    // gap between decode attempts
-  var MAX_EDGE = 960;           // downscale the cropped region to this before decoding
+  var SCAN_INTERVAL_MS = 40;    // breathing room between decode attempts
+  var MAX_EDGE = 1280;          // downscale the cropped region to this before decoding
+  var REGION_PAD = 0.15;        // decode a slightly larger area than the visible frame
+  var READER_OPTS = { tryHarder: true, maxNumberOfSymbols: 1 };
   var DUPE_WINDOW_MS = 1800;    // ignore the same value re-read within this window
   var RESUME_COOLDOWN_MS = 1200;// after keep/discard, suppress the same code this long
   var AUTO_CONFIRM_MS = 1100;   // how long the confirmation card stays up in rapid mode
@@ -32,7 +35,7 @@
   var state = {
     running: false, starting: false, paused: false,
     stream: null, track: null,
-    engine: null, detector: null, zxing: null, zxingHints: null,
+    engine: null, detector: null, wasm: null, zxing: null, zxingHints: null,
     deviceIds: [], deviceIndex: 0,
     torchOn: false,
     mode: 'auto',
@@ -43,16 +46,23 @@
     history: []
   };
 
+  var isAndroid = /android/i.test(navigator.userAgent || '');
+
   var canvas = document.createElement('canvas');
   var ctx = canvas.getContext('2d', { willReadFrequently: true });
   var audioCtx = null;
 
   var FORMAT_NAMES = {
-    QR_CODE: 'QR Code', DATA_MATRIX: 'Data Matrix', PDF_417: 'PDF417', PDF417: 'PDF417',
-    AZTEC: 'Aztec', CODABAR: 'Codabar', CODE_39: 'Code 39', CODE_93: 'Code 93',
-    CODE_128: 'Code 128', EAN_8: 'EAN-8', EAN_13: 'EAN-13', ITF: 'ITF',
-    UPC_A: 'UPC-A', UPC_E: 'UPC-E', RSS_14: 'DataBar', RSS_EXPANDED: 'DataBar Expanded',
-    DATABAR: 'DataBar', MAXICODE: 'MaxiCode', UPC_EAN_EXTENSION: 'UPC/EAN Ext',
+    QR_CODE: 'QR Code', QRCODE: 'QR Code', MICROQRCODE: 'Micro QR', RMQRCODE: 'rMQR',
+    DATA_MATRIX: 'Data Matrix', DATAMATRIX: 'Data Matrix',
+    PDF_417: 'PDF417', PDF417: 'PDF417', AZTEC: 'Aztec', CODABAR: 'Codabar',
+    CODE_39: 'Code 39', CODE39: 'Code 39', CODE_93: 'Code 93', CODE93: 'Code 93',
+    CODE_128: 'Code 128', CODE128: 'Code 128',
+    EAN_8: 'EAN-8', 'EAN-8': 'EAN-8', EAN_13: 'EAN-13', 'EAN-13': 'EAN-13',
+    ITF: 'ITF', UPC_A: 'UPC-A', 'UPC-A': 'UPC-A', UPC_E: 'UPC-E', 'UPC-E': 'UPC-E',
+    RSS_14: 'DataBar', DATABAR: 'DataBar', RSS_EXPANDED: 'DataBar Expanded',
+    DATABAREXPANDED: 'DataBar Expanded', DATABARLIMITED: 'DataBar Limited',
+    MAXICODE: 'MaxiCode', UPC_EAN_EXTENSION: 'UPC/EAN Ext', DXFILMEDGE: 'DX Film Edge',
     UNKNOWN: 'Code'
   };
 
@@ -88,8 +98,10 @@
   function setupEngine() {
     if (state.engine) return Promise.resolve();
 
+    // Android's BarcodeDetector is ML Kit-backed — fast and accurate. Desktop and
+    // iOS builds are missing or unreliable, so everything else gets the wasm decoder.
     var native = Promise.resolve(null);
-    if ('BarcodeDetector' in window && window.BarcodeDetector.getSupportedFormats) {
+    if (isAndroid && 'BarcodeDetector' in window && window.BarcodeDetector.getSupportedFormats) {
       native = window.BarcodeDetector.getSupportedFormats().catch(function () { return null; });
     }
 
@@ -99,28 +111,40 @@
           state.detector = new window.BarcodeDetector({ formats: formats });
           state.engine = 'native';
           el.engineBadge.textContent = 'Native';
-          el.engineBadge.title = 'Using the built-in BarcodeDetector (' + formats.length + ' formats)';
+          el.engineBadge.title = 'Built-in BarcodeDetector (' + formats.length + ' formats)';
           return;
-        } catch (e) { /* fall through to ZXing */ }
+        } catch (e) { /* fall through to wasm */ }
       }
-      return loadScript('vendor/zxing.min.js').then(function () {
-        var Z = window.ZXing;
-        var hints = new Map();
-        hints.set(Z.DecodeHintType.TRY_HARDER, true);
-        hints.set(Z.DecodeHintType.POSSIBLE_FORMATS, [
-          Z.BarcodeFormat.QR_CODE, Z.BarcodeFormat.DATA_MATRIX, Z.BarcodeFormat.AZTEC,
-          Z.BarcodeFormat.PDF_417, Z.BarcodeFormat.CODE_128, Z.BarcodeFormat.CODE_39,
-          Z.BarcodeFormat.CODE_93, Z.BarcodeFormat.CODABAR, Z.BarcodeFormat.EAN_13,
-          Z.BarcodeFormat.EAN_8, Z.BarcodeFormat.UPC_A, Z.BarcodeFormat.UPC_E,
-          Z.BarcodeFormat.ITF, Z.BarcodeFormat.RSS_14
-        ]);
-        var reader = new Z.MultiFormatReader();
-        reader.setHints(hints);
-        state.zxing = reader;
-        state.zxingHints = hints;
-        state.engine = 'zxing';
-        el.engineBadge.textContent = 'ZXing';
-        el.engineBadge.title = 'Using the bundled ZXing decoder';
+      return loadScript('vendor/zxing-wasm/index.js').then(function () {
+        var W = window.ZXingWASM;
+        W.prepareZXingModule({
+          overrides: {
+            locateFile: function (path, prefix) {
+              return /\.wasm$/.test(path) ? 'vendor/zxing-wasm/' + path : prefix + path;
+            }
+          }
+        });
+        // Decode a dummy image up front so wasm fetch+compile doesn't eat the first scan.
+        return W.readBarcodes(ctx.createImageData(8, 8), READER_OPTS).then(function () {
+          state.wasm = W;
+          state.engine = 'wasm';
+          el.engineBadge.textContent = 'WASM';
+          el.engineBadge.title = 'zxing-cpp WebAssembly decoder';
+        });
+      }).catch(function () {
+        // Last resort: the old JS port of ZXing.
+        return loadScript('vendor/zxing.min.js').then(function () {
+          var Z = window.ZXing;
+          var hints = new Map();
+          hints.set(Z.DecodeHintType.TRY_HARDER, true);
+          var reader = new Z.MultiFormatReader();
+          reader.setHints(hints);
+          state.zxing = reader;
+          state.zxingHints = hints;
+          state.engine = 'zxing-js';
+          el.engineBadge.textContent = 'ZXing JS';
+          el.engineBadge.title = 'Legacy JS decoder';
+        });
       });
     });
   }
@@ -192,7 +216,18 @@
       var p = el.video.play();
       if (p && p.catch) p.catch(function () {});   // deliberately not awaited
       return waitForVideo(4000);
-    }).then(refreshDevices).then(updateTorchButton);
+    }).then(improveTrack).then(refreshDevices).then(updateTorchButton);
+  }
+
+  // Blurry close-ups are the main cause of missed 1D reads — ask the camera to
+  // keep refocusing rather than lock focus at whatever distance it opened with.
+  function improveTrack() {
+    var t = state.track;
+    if (!t || !t.getCapabilities || !t.applyConstraints) return;
+    var caps = null;
+    try { caps = t.getCapabilities(); } catch (e) {}
+    if (!caps || !Array.isArray(caps.focusMode) || caps.focusMode.indexOf('continuous') < 0) return;
+    return t.applyConstraints({ advanced: [{ focusMode: 'continuous' }] }).catch(function () {});
   }
 
   function updateTorchButton() {
@@ -266,10 +301,12 @@
     var offX = (vr.width - v.videoWidth * scale) / 2;
     var offY = (vr.height - v.videoHeight * scale) / 2;
 
-    var sx = (fr.left - vr.left - offX) / scale;
-    var sy = (fr.top - vr.top - offY) / scale;
-    var sw = fr.width / scale;
-    var sh = fr.height / scale;
+    // Decode a padded region: codes held slightly off-frame should still read.
+    var pad = Math.min(fr.width, fr.height) * REGION_PAD;
+    var sx = (fr.left - pad - vr.left - offX) / scale;
+    var sy = (fr.top - pad - vr.top - offY) / scale;
+    var sw = (fr.width + pad * 2) / scale;
+    var sh = (fr.height + pad * 2) / scale;
 
     sx = Math.max(0, Math.min(sx, v.videoWidth - 1));
     sy = Math.max(0, Math.min(sy, v.videoHeight - 1));
@@ -285,12 +322,32 @@
 
   function scanTick() {
     if (!state.running || state.paused) return;
-    if (!captureRegion()) { schedule(); return; }
+    var t0 = Date.now();
+    var done = function () {
+      // Keep the cadence tight when decoding is fast, back off when it is slow.
+      schedule(Date.now() - t0 > 120 ? 20 : SCAN_INTERVAL_MS);
+    };
 
     if (state.engine === 'native') {
-      state.detector.detect(canvas).then(function (codes) {
+      // Full-resolution frame straight from the video element — no canvas copy.
+      var v = el.video;
+      if (v.readyState < 2 || !v.videoWidth) { schedule(); return; }
+      state.detector.detect(v).then(function (codes) {
         if (codes && codes.length) onCode(codes[0].rawValue, codes[0].format);
-      }).catch(function () {}).then(function () { schedule(); });
+      }).catch(function () {}).then(done);
+      return;
+    }
+
+    if (!captureRegion()) { schedule(); return; }
+
+    if (state.engine === 'wasm') {
+      var img;
+      try { img = ctx.getImageData(0, 0, canvas.width, canvas.height); }
+      catch (e) { schedule(); return; }
+      state.wasm.readBarcodes(img, READER_OPTS).then(function (results) {
+        var r = results && results[0];
+        if (r && r.text) onCode(r.text, r.format);
+      }).catch(function () {}).then(done);
       return;
     }
 
@@ -304,7 +361,7 @@
       // NotFoundException on every empty frame — expected.
     }
     try { state.zxing.reset(); } catch (e) {}
-    schedule();
+    done();
   }
 
   function onCode(value, format) {
@@ -655,5 +712,5 @@
     el.startBtn.disabled = true;
   }
 
-  el.engineBadge.textContent = ('BarcodeDetector' in window) ? 'Native' : 'ZXing';
+  el.engineBadge.textContent = (isAndroid && 'BarcodeDetector' in window) ? 'Native' : 'WASM';
 })();
