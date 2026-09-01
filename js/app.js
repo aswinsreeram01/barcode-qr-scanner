@@ -8,6 +8,9 @@
   var MAX_EDGE = 1280;          // downscale the cropped region to this before decoding
   var REGION_PAD = 0.15;        // decode a slightly larger area than the visible frame
   var READER_OPTS = { tryHarder: true, maxNumberOfSymbols: 1 };
+  var DEFAULT_ZOOM = 2;         // sensor-crop zoom: lets you scan from where focus works
+  var BACKUP_AFTER_MS = 3000;   // native engine dry spell before the wasm backup joins in
+  var ZOOM_KEY = 'scan.zoom.v1';
   var DUPE_WINDOW_MS = 1800;    // ignore the same value re-read within this window
   var RESUME_COOLDOWN_MS = 1200;// after keep/discard, suppress the same code this long
   var AUTO_CONFIRM_MS = 1100;   // how long the confirmation card stays up in rapid mode
@@ -22,6 +25,8 @@
     notice: $('notice'), engineBadge: $('engineBadge'),
     sessionChip: $('sessionChip'), sessionCount: $('sessionCount'),
     armed: $('armed'),
+    zoomWrap: $('zoomWrap'), zoomSlider: $('zoomSlider'), zoomLabel: $('zoomLabel'),
+    focusRing: $('focusRing'),
     confirm: $('confirm'), confirmCard: $('confirmCard'), confirmFormat: $('confirmFormat'),
     confirmIndex: $('confirmIndex'), confirmValue: $('confirmValue'),
     confirmActions: $('confirmActions'), keepBtn: $('keepBtn'), discardBtn: $('discardBtn'),
@@ -35,7 +40,9 @@
   var state = {
     running: false, starting: false, paused: false,
     stream: null, track: null,
-    engine: null, detector: null, wasm: null, zxing: null, zxingHints: null,
+    engine: null, detector: null, wasm: null, wasmLoading: null,
+    zxing: null, zxingHints: null,
+    lastHitAt: 0, backupN: 0, zoomTarget: 0, zoomBusy: false,
     deviceIds: [], deviceIndex: 0,
     torchOn: false,
     mode: 'auto',
@@ -95,6 +102,28 @@
     });
   }
 
+  function loadWasm() {
+    if (state.wasm) return Promise.resolve(state.wasm);
+    if (state.wasmLoading) return state.wasmLoading;
+    state.wasmLoading = loadScript('vendor/zxing-wasm/index.js').then(function () {
+      var W = window.ZXingWASM;
+      W.prepareZXingModule({
+        overrides: {
+          locateFile: function (path, prefix) {
+            return /\.wasm$/.test(path) ? 'vendor/zxing-wasm/' + path : prefix + path;
+          }
+        }
+      });
+      // Decode a dummy image up front so wasm fetch+compile doesn't eat the first scan.
+      return W.readBarcodes(ctx.createImageData(8, 8), READER_OPTS).then(function () {
+        state.wasm = W;
+        return W;
+      });
+    });
+    state.wasmLoading.catch(function () { state.wasmLoading = null; });
+    return state.wasmLoading;
+  }
+
   function setupEngine() {
     if (state.engine) return Promise.resolve();
 
@@ -115,22 +144,10 @@
           return;
         } catch (e) { /* fall through to wasm */ }
       }
-      return loadScript('vendor/zxing-wasm/index.js').then(function () {
-        var W = window.ZXingWASM;
-        W.prepareZXingModule({
-          overrides: {
-            locateFile: function (path, prefix) {
-              return /\.wasm$/.test(path) ? 'vendor/zxing-wasm/' + path : prefix + path;
-            }
-          }
-        });
-        // Decode a dummy image up front so wasm fetch+compile doesn't eat the first scan.
-        return W.readBarcodes(ctx.createImageData(8, 8), READER_OPTS).then(function () {
-          state.wasm = W;
-          state.engine = 'wasm';
-          el.engineBadge.textContent = 'WASM';
-          el.engineBadge.title = 'zxing-cpp WebAssembly decoder';
-        });
+      return loadWasm().then(function () {
+        state.engine = 'wasm';
+        el.engineBadge.textContent = 'WASM';
+        el.engineBadge.title = 'zxing-cpp WebAssembly decoder';
       }).catch(function () {
         // Last resort: the old JS port of ZXing.
         return loadScript('vendor/zxing.min.js').then(function () {
@@ -161,7 +178,7 @@
   }
 
   function baseConstraints() {
-    var v = { width: { ideal: 1920 }, height: { ideal: 1080 } };
+    var v = { width: { ideal: 2560 }, height: { ideal: 1440 } };
     if (state.deviceIds.length) {
       v.deviceId = { exact: state.deviceIds[state.deviceIndex] };
     } else {
@@ -216,7 +233,7 @@
       var p = el.video.play();
       if (p && p.catch) p.catch(function () {});   // deliberately not awaited
       return waitForVideo(4000);
-    }).then(improveTrack).then(refreshDevices).then(updateTorchButton);
+    }).then(improveTrack).then(setupZoom).then(refreshDevices).then(updateTorchButton);
   }
 
   // Blurry close-ups are the main cause of missed 1D reads — ask the camera to
@@ -228,6 +245,79 @@
     try { caps = t.getCapabilities(); } catch (e) {}
     if (!caps || !Array.isArray(caps.focusMode) || caps.focusMode.indexOf('continuous') < 0) return;
     return t.applyConstraints({ advanced: [{ focusMode: 'continuous' }] }).catch(function () {});
+  }
+
+  // Phone cameras usually cannot focus close enough for a barcode to fill the
+  // frame. Sensor-crop zoom is the fix scanning apps use: scan from 20-30cm out,
+  // where autofocus works, and let zoom supply the magnification.
+  function setupZoom() {
+    var t = state.track, caps = null;
+    try { caps = t && t.getCapabilities ? t.getCapabilities() : null; } catch (e) {}
+    var z = caps && caps.zoom;
+    if (!z || !(z.max > z.min)) { el.zoomWrap.hidden = true; return; }
+    var saved = NaN;
+    try { saved = parseFloat(window.localStorage.getItem(ZOOM_KEY)); } catch (e) {}
+    var target = isFinite(saved) ? saved : DEFAULT_ZOOM;
+    target = Math.min(z.max, Math.max(z.min, target));
+    el.zoomSlider.min = z.min;
+    el.zoomSlider.max = z.max;
+    el.zoomSlider.step = z.step || 0.1;
+    el.zoomSlider.value = target;
+    el.zoomWrap.hidden = false;
+    applyZoom(target);
+  }
+
+  function applyZoom(value) {
+    if (!state.track) return;
+    state.zoomTarget = value;
+    el.zoomLabel.textContent = value.toFixed(1) + '×';
+    if (state.zoomBusy) return;
+    state.zoomBusy = true;
+    var run = function () {
+      var t = state.zoomTarget;
+      var track = state.track;
+      if (!track) { state.zoomBusy = false; return; }
+      track.applyConstraints({ advanced: [{ zoom: t }] }).catch(function () {}).then(function () {
+        if (state.zoomTarget !== t && state.track) { run(); return; }
+        state.zoomBusy = false;
+        try { window.localStorage.setItem(ZOOM_KEY, String(state.zoomTarget)); } catch (e) {}
+      });
+    };
+    run();
+  }
+
+  function refocusAt(clientX, clientY) {
+    var t = state.track;
+    if (!t || !t.applyConstraints) return;
+    var caps = null;
+    try { caps = t.getCapabilities ? t.getCapabilities() : null; } catch (e) {}
+    var adv = [];
+    if (caps && Array.isArray(caps.focusMode) && caps.focusMode.indexOf('single-shot') >= 0) {
+      adv.push({ focusMode: 'single-shot' });
+    }
+    if (caps && caps.pointsOfInterest !== undefined) {
+      var vr = el.video.getBoundingClientRect();
+      if (vr.width && vr.height) {
+        adv.push({ pointsOfInterest: [{
+          x: Math.min(1, Math.max(0, (clientX - vr.left) / vr.width)),
+          y: Math.min(1, Math.max(0, (clientY - vr.top) / vr.height))
+        }] });
+      }
+    }
+    if (!adv.length) return;
+    showFocusRing(clientX, clientY);
+    t.applyConstraints({ advanced: adv }).catch(function () {}).then(function () {
+      window.setTimeout(function () { if (state.track === t) improveTrack(); }, 900);
+    });
+  }
+
+  function showFocusRing(x, y) {
+    var sr = el.stage.getBoundingClientRect();
+    el.focusRing.style.left = (x - sr.left) + 'px';
+    el.focusRing.style.top = (y - sr.top) + 'px';
+    el.focusRing.classList.remove('go');
+    void el.focusRing.offsetWidth;
+    el.focusRing.classList.add('go');
   }
 
   function updateTorchButton() {
@@ -334,7 +424,7 @@
       if (v.readyState < 2 || !v.videoWidth) { schedule(); return; }
       state.detector.detect(v).then(function (codes) {
         if (codes && codes.length) onCode(codes[0].rawValue, codes[0].format);
-      }).catch(function () {}).then(done);
+      }).catch(function () {}).then(nativeBackup).then(done);
       return;
     }
 
@@ -364,9 +454,32 @@
     done();
   }
 
+  // If the native detector has gone a while without reading anything, pull in the
+  // wasm decoder and interleave it — it handles cases ML Kit sometimes misses.
+  function nativeBackup() {
+    if (!state.running || state.paused) return;
+    if (Date.now() - state.lastHitAt < BACKUP_AFTER_MS) return;
+    if (!state.wasm) { loadWasm().catch(function () {}); return; }
+    state.backupN = (state.backupN + 1) % 3;
+    if (state.backupN !== 0) return;
+    if (!captureRegion()) return;
+    var img;
+    try { img = ctx.getImageData(0, 0, canvas.width, canvas.height); } catch (e) { return; }
+    return state.wasm.readBarcodes(img, READER_OPTS).then(function (results) {
+      var r = results && results[0];
+      if (r && r.text) {
+        onCode(r.text, r.format);
+        // The native detector is evidently missing these codes — keep the
+        // backup engaged instead of letting this hit reset the dry-spell clock.
+        state.lastHitAt = 0;
+      }
+    }).catch(function () {});
+  }
+
   function onCode(value, format) {
     if (value == null || value === '') return;
     var now = Date.now();
+    state.lastHitAt = now;
     if (value === state.lastValue && now - state.lastAt < DUPE_WINDOW_MS) {
       state.lastAt = now;
       return;
@@ -626,6 +739,8 @@
       state.lastValue = '';
       state.lastAt = 0;
       state.sessionCount = 0;
+      state.lastHitAt = Date.now();
+      state.backupN = 0;
       el.sessionCount.textContent = '0';
       el.sessionChip.hidden = false;
       el.stage.classList.add('live');
@@ -662,6 +777,7 @@
     el.torchBtn.disabled = true;
     el.torchBtn.classList.remove('active');
     el.flipBtn.disabled = true;
+    el.zoomWrap.hidden = true;
     el.sessionChip.hidden = state.sessionCount === 0;
   }
 
@@ -678,6 +794,14 @@
   el.discardBtn.addEventListener('click', discardPending);
   el.modeAuto.addEventListener('click', function () { setMode('auto'); });
   el.modeConfirm.addEventListener('click', function () { setMode('confirm'); });
+  el.zoomSlider.addEventListener('input', function () {
+    applyZoom(parseFloat(el.zoomSlider.value));
+  });
+  el.stage.addEventListener('click', function (ev) {
+    if (!state.running || state.paused) return;
+    if (ev.target.closest && ev.target.closest('.zoom')) return;
+    refocusAt(ev.clientX, ev.clientY);
+  });
 
   // Tapping a non-blocking confirmation dismisses it early.
   el.confirm.addEventListener('click', function (ev) {

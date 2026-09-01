@@ -25,6 +25,12 @@ a short suppression window has to elapse, or a different code has to be read.
   decoder everywhere else — including iOS Safari. Rotated, tilted and inverted codes
   read fine; a legacy JS decoder remains as a last-resort fallback
 - Continuous autofocus is requested where the camera supports it
+- **Zoom slider** (defaults to 2x, remembered between sessions) — the right way to read
+  small or distant codes is to zoom in from 20-30 cm out, where autofocus actually
+  works, not to move the phone closer into its macro blind zone
+- **Tap the preview to refocus** on that spot (where the camera exposes it)
+- On Android, if the native detector goes 3 s without a read the wasm decoder is
+  pulled in and interleaved as a backup
 - Running count for the current session, plus a persistent scan list
 - Tap any row to copy it, or **Copy all** to grab the whole list in scan order
 - Flashlight toggle and camera switching, where the hardware supports it
@@ -40,6 +46,13 @@ The exact set depends on the engine: native `BarcodeDetector` advertises its own
 (Android Chrome covers all the common ones); the wasm decoder covers the list above plus
 Micro QR, rMQR and DataBar Limited. The badge in the top-right shows which engine is
 running — Native, WASM, or ZXing JS.
+
+## Scanning tips
+
+- Hold the phone 20-30 cm away and use the zoom slider — do not move closer than the
+  camera can focus.
+- Tap the preview to force a refocus if the image stays soft.
+- Use the flashlight button on glossy or dim codes.
 
 ## Requirements
 
