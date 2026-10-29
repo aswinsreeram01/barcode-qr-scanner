@@ -1,0 +1,12 @@
+{
+  "name": "scan-mrp-tests",
+  "private": true,
+  "description": "Runs the app's on-device MRP reader and rules against sample label photos in Node.",
+  "scripts": {
+    "bench": "node mrp-bench.js ../samples"
+  },
+  "devDependencies": {
+    "onnxruntime-node": "1.31.1",
+    "sharp": "0.34.5"
+  }
+}

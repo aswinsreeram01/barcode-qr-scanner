@@ -78,6 +78,32 @@
       </div>
     </div>
 
+    <div class="audit" id="audit" hidden>
+      <div class="audit-card" id="auditCard" role="status" aria-live="polite">
+        <div class="audit-top">
+          <span class="audit-step" id="auditStep">Now show the MRP</span>
+          <span class="audit-actions" id="auditActions">
+            <button type="button" class="pill" id="auditPhotoBtn">Photo</button>
+            <button type="button" class="pill" id="auditPickBtn">Choose MRP</button>
+          </span>
+          <button type="button" class="linkbtn" id="auditCancel">Cancel</button>
+        </div>
+        <div class="audit-what">
+          <span class="audit-product" id="auditProduct"></span>
+          <span class="audit-allowed" id="auditAllowed"></span>
+        </div>
+        <div class="audit-code" id="auditCode"></div>
+        <div class="audit-status" id="auditStatus"></div>
+        <div class="audit-choices" id="auditChoices" hidden></div>
+        <form class="audit-other" id="auditOther" hidden>
+          <input type="text" inputmode="decimal" autocomplete="off" id="auditOtherInput" placeholder="MRP as printed, e.g. 3300" aria-label="MRP as printed on the label">
+          <button type="submit" class="btn primary">Save</button>
+        </form>
+        <img class="audit-shot" id="auditShot" alt="The label as the camera saw it" hidden>
+      </div>
+    </div>
+    <input type="file" accept="image/*" id="auditPhoto" hidden>
+
     <div class="flash" id="flash" aria-hidden="true"></div>
   </main>
 
@@ -104,17 +130,47 @@
       <button type="button" class="seg" id="modeConfirm" data-mode="confirm" aria-pressed="false">
         Confirm each <small>tap to keep</small>
       </button>
+      <button type="button" class="seg" id="modeAudit" data-mode="audit" aria-pressed="false">
+        Audit <small>barcode + MRP</small>
+      </button>
     </div>
 
-    <div class="history-head">
-      <h2>Scans <span class="count" id="historyCount">0</span></h2>
-      <div class="head-actions">
-        <button type="button" class="linkbtn" id="exportBtn" hidden>Copy all</button>
-        <button type="button" class="linkbtn" id="clearBtn" hidden>Clear</button>
+    <section id="scanSection">
+      <div class="history-head">
+        <h2>Scans <span class="count" id="historyCount">0</span></h2>
+        <div class="head-actions">
+          <button type="button" class="linkbtn" id="exportBtn" hidden>Copy all</button>
+          <button type="button" class="linkbtn" id="clearBtn" hidden>Clear</button>
+        </div>
       </div>
-    </div>
-    <ul class="history" id="history"></ul>
-    <p class="empty" id="historyEmpty">Every code you scan lands here. Tap a row to copy it.</p>
+      <ul class="history" id="history"></ul>
+      <p class="empty" id="historyEmpty">Every code you scan lands here. Tap a row to copy it.</p>
+    </section>
+
+    <section id="auditSection" hidden>
+      <div class="refbar">
+        <div class="ref-info">
+          <b id="refTitle">No reference list</b>
+          <span id="refSub">Import a CSV with barcode and MRP columns from your stock system.</span>
+        </div>
+        <div class="ref-actions">
+          <button type="button" class="btn small" id="refImportBtn">Import CSV</button>
+          <button type="button" class="linkbtn" id="refRemoveBtn" hidden>Remove</button>
+        </div>
+        <input type="file" accept=".csv,.txt,text/csv,text/plain" id="refFile" hidden>
+      </div>
+      <p class="ocr-state" id="ocrState" hidden></p>
+
+      <div class="history-head">
+        <h2>Audit <span class="count" id="auditUnits">0</span></h2>
+        <div class="head-actions">
+          <button type="button" class="linkbtn" id="auditExportBtn" hidden>Export CSV</button>
+          <button type="button" class="linkbtn" id="auditClearBtn" hidden>Clear</button>
+        </div>
+      </div>
+      <ul class="history audit-list" id="auditList"></ul>
+      <p class="empty" id="auditEmpty">Scan a barcode, then show its MRP label. Each unit lands here with how its MRP was checked.</p>
+    </section>
 
     <footer class="foot">
       Runs entirely in your browser — nothing is uploaded.
@@ -127,6 +183,8 @@
   <p style="padding:1.5rem;color:#e6edf3;font:16px/1.5 system-ui">This scanner needs JavaScript to access the camera.</p>
 </noscript>
 
+<script src="js/mrp.js"></script>
+<script src="js/reference.js"></script>
 <script src="js/app.js"></script>
 </body>
 </html>
