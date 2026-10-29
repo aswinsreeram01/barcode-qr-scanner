@@ -1,0 +1,8 @@
+PaddleOCR PP-OCRv4 models, converted to ONNX
+https://github.com/PaddlePaddle/PaddleOCR — Apache License 2.0
+
+det.onnx   ch_PP-OCRv4_det_infer   text detection
+rec.onnx   ch_PP-OCRv4_rec_infer   text recognition (Chinese + English charset)
+keys.txt   ppocr_keys_v1.txt        recognition dictionary
+
+ONNX files as distributed in @gutenye/ocr-models 1.4.2 (MIT packaging).

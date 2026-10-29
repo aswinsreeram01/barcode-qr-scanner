@@ -348,7 +348,7 @@ html, body {
 
 .modes {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: 1fr 1fr 1fr;
   gap: 6px;
   padding: 4px;
   margin-bottom: 16px;
@@ -543,4 +543,158 @@ html, body {
 @keyframes focusring {
   0% { opacity: 1; transform: translate(-50%, -50%) scale(1.4); }
   100% { opacity: 0; transform: translate(-50%, -50%) scale(.8); }
+}
+
+/* ---------- audit: label frame ---------- */
+.frame { transition: width .25s ease, aspect-ratio .25s ease; }
+.frame.label { width: 94%; aspect-ratio: 1.55; }
+.frame.label .scanline { display: none; }
+
+/* ---------- audit: MRP card on the camera view ---------- */
+/* While reading, a slim strip at the top keeps the label frame in view; when the
+   person has to decide, it becomes a centred card. */
+.audit {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding: 8px;
+  z-index: 3;
+  pointer-events: none;
+}
+.audit.blocking { background: rgba(5, 8, 12, .6); align-items: center; }
+.audit-card {
+  pointer-events: auto;
+  width: 100%;
+  max-width: 440px;
+  max-height: 100%;
+  overflow-y: auto;
+  background: rgba(19, 25, 34, .95);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  box-shadow: 0 10px 30px rgba(0, 0, 0, .5);
+  padding: 8px 12px 9px;
+  animation: confirmIn .16s ease-out;
+}
+.audit.blocking .audit-card { padding: 12px 14px; }
+.audit-card.ok { border-color: rgba(88, 245, 200, .6); }
+.audit-card.warn { border-color: rgba(255, 204, 102, .6); }
+.audit-top { display: flex; align-items: center; gap: 8px; min-height: 28px; }
+.audit-step {
+  margin-right: auto;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: .05em;
+  text-transform: uppercase;
+  color: var(--accent);
+  white-space: nowrap;
+}
+.audit-card.warn .audit-step { color: #ffcc66; }
+.audit-actions { display: flex; gap: 6px; }
+.pill {
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--panel-2);
+  color: var(--text);
+  font: inherit;
+  font-size: 12.5px;
+  font-weight: 600;
+  padding: 5px 11px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.audit-what {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin-top: 2px;
+  font-size: 13.5px;
+  min-width: 0;
+}
+.audit-product { font-weight: 650; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.audit-product:empty { display: none; }
+.audit-allowed { flex: none; color: var(--muted); }
+.audit-allowed.warn { flex: 1; color: #ffe0a3; }
+.audit.blocking .audit-what { display: grid; gap: 4px; margin-top: 4px; }
+.audit.blocking .audit-product { white-space: normal; font-size: 15px; }
+.audit.blocking .audit-allowed { color: var(--text); }
+.audit-code { display: none; font: 500 12.5px/1.4 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; color: var(--muted); }
+.audit.blocking .audit-code { display: block; }
+.audit-status { margin-top: 3px; font-size: 13px; color: var(--muted); }
+.audit.blocking .audit-status { margin-top: 8px; font-size: 13.5px; }
+.audit-status strong { color: var(--text); font-size: 18px; font-variant-numeric: tabular-nums; }
+.audit-shot {
+  display: block;
+  width: 100%;
+  max-height: 34dvh;
+  object-fit: contain;
+  margin-top: 10px;
+  border-radius: 10px;
+  background: #000;
+}
+.audit-choices { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 8px; margin-top: 12px; }
+.audit-choices .btn { min-height: 46px; padding: 8px 10px; font-variant-numeric: tabular-nums; }
+.audit-choices .btn small { display: block; font-size: 11px; font-weight: 500; opacity: .8; }
+.audit-choices .btn.flag { border-color: rgba(255, 204, 102, .55); color: #ffe0a3; }
+.audit-choices .btn.suggested { border-color: var(--accent); }
+.audit-other { display: flex; gap: 8px; margin-top: 10px; }
+.audit-other input {
+  flex: 1;
+  min-width: 0;
+  font: inherit;
+  font-size: 16px;            /* stops iOS zooming into the field */
+  color: var(--text);
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 10px 12px;
+}
+.audit-other .btn.primary { flex: 0 0 auto; }
+
+/* ---------- audit: reference list + results ---------- */
+.refbar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 12px;
+  margin-bottom: 12px;
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+}
+.ref-info { flex: 1; min-width: 0; display: grid; gap: 2px; }
+.ref-info b { font-size: 14px; }
+.ref-info span { font-size: 12px; color: var(--muted); }
+.ref-actions { display: grid; justify-items: center; gap: 2px; }
+.btn.small { min-height: 36px; padding: 6px 12px; font-size: 13.5px; }
+.ocr-state { margin: -4px 0 12px; font-size: 12.5px; color: var(--muted); }
+.ocr-state.warn { color: #ffe0a3; }
+
+.audit-list li { cursor: default; }
+.audit-list .h-val { font: inherit; font-size: 14px; font-weight: 600; }
+.mrp-chip {
+  flex: none;
+  font-size: 13px;
+  font-weight: 650;
+  font-variant-numeric: tabular-nums;
+  border-radius: 8px;
+  padding: 3px 8px;
+  background: rgba(88, 245, 200, .1);
+  color: var(--accent);
+}
+.mrp-chip.warn { background: rgba(255, 204, 102, .12); color: #ffcc66; }
+.qty { flex: none; font-weight: 700; font-variant-numeric: tabular-nums; min-width: 2.2em; text-align: right; }
+.minus {
+  flex: none;
+  width: 34px;
+  height: 34px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: transparent;
+  color: var(--muted);
+  font: inherit;
+  font-size: 17px;
+  line-height: 1;
+  cursor: pointer;
 }

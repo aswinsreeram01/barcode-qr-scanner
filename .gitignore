@@ -1,3 +1,5 @@
 .claude/
 .DS_Store
 Thumbs.db
+samples/
+test/node_modules/
