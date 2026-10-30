@@ -1,14 +1,12 @@
 /* Runs the app's own OCR + MRP rules on sample photos, the way the live audit flow does:
- * up to Mrp.MAX_FRAMES camera frames per product, each framed slightly differently.
+ * several camera frames per product, each framed slightly differently.
  *
  *   cd test && npm install && node mrp-bench.js ../samples
  *
  * Sample files are named NN_description_MRP-<amount>.jpg; CROPS below says where the
- * label sits in each photo (what the on-screen frame would cover). Every sample is
- * tried against three reference situations:
- *   match     — the reference lists the label's MRP (plus another one)  → expect VERIFIED
- *   mismatch  — the reference does NOT list it (wrong-price label)       → must never verify
- *   unknown   — the barcode is not in the reference at all               → verify only via USP */
+ * label sits in each photo (what the on-screen frame would cover). Each sample is scored
+ * as the first unit of its barcode, as a repeat unit (its price already counted), and
+ * with a different price already counted (which must not attract the reading). */
 'use strict';
 const fs = require('fs');
 const path = require('path');
@@ -30,7 +28,7 @@ const MAX_EDGE = 1280;  // same downscale the app applies to the captured frame
 // Consecutive camera frames never line up exactly: drawn frame, looser, nudged, drawn.
 function framing([x, y, w, h], i, W, H) {
   const f = [[0, 0, 1], [-0.12, -0.12, 1.24], [0.05, 0.05, 1], [0, 0, 1]][i % 4];
-  let nx = Math.max(0, Math.round(x + w * f[0])), ny = Math.max(0, Math.round(y + h * f[1]));
+  const nx = Math.max(0, Math.round(x + w * f[0])), ny = Math.max(0, Math.round(y + h * f[1]));
   return [nx, ny, Math.min(W - nx, Math.round(w * f[2])), Math.min(H - ny, Math.round(h * f[2]))];
 }
 
@@ -51,56 +49,51 @@ async function frameImage(file, crop, i) {
   });
 
   const files = fs.readdirSync(dir).filter(f => /^\d\d_.*MRP-[\d.]+\.jpe?g$/i.test(f)).sort();
-  const totals = { match: {}, mismatch: {}, unknown: {} };
-  let wrongVerified = 0, reads = 0, readMs = 0;
+  const totals = {};
+  let wrong = 0, reads = 0, readMs = 0;
 
   for (const f of files) {
     const truth = parseFloat(f.match(/MRP-([\d.]+)/)[1]);
     const crop = CROPS[f.slice(0, 2)];
     if (!crop) continue;
-    // OCR each frame once — how a frame is straightened depends only on whether earlier
-    // frames found an MRP, not on the reference, so the scenarios can share the reads.
+    // OCR each frame once; how a frame is straightened does not depend on `seen`.
     const frames = [];
     for (let i = 0; i < Mrp.MAX_FRAMES; i++) {
       const plan = Mrp.nextAttempt(frames);
       const img = await frameImage(path.join(dir, f), crop, i);
       const res = await engine.read(img, plan);
       reads++; readMs += res.ms.total;
-      const a = Mrp.assess(res.lines, null);
+      const a = Mrp.assess(res.lines, []);
       frames.push({ lines: res.lines, found: a.found, skew: res.skew, flip: plan.flip });
     }
     if (process.env.DUMP) frames.forEach((fr, i) => console.log(`  [${f.slice(0, 2)} f${i} skew ${fr.skew}${fr.flip ? ' flip' : ''}]`,
       fr.lines.map(l => `${l.text} {${l.mean.toFixed(2)}}`).join(' | ')));
 
-    const scenarios = {
-      // Another MRP alongside the right one. Sample 06 gets one a single digit away
-      // (3,300 vs 3,380), where only the USP line is allowed to settle it.
-      match: f.startsWith('06') ? [3300, 3380] : [truth, Math.round(truth * 1.08)],
-      mismatch: [Math.round(truth * 1.06)],
-      unknown: null
-    };
+    const scenarios = { first: [], repeat: [truth], other: [Math.round(truth * 1.06)] };
     const row = [f.slice(0, 2).padEnd(3), String(truth).padEnd(5)];
-    for (const [name, allowed] of Object.entries(scenarios)) {
-      const seen = [];
+    for (const [name, seen] of Object.entries(scenarios)) {
+      const got = [];
       let d = { status: 'pending' };
       for (let i = 0; i < frames.length && d.status === 'pending'; i++) {
-        seen.push(Mrp.assess(frames[i].lines, allowed));
-        d = Mrp.decide(seen, allowed);
+        got.push(Mrp.assess(frames[i].lines, seen));
+        d = Mrp.decide(got, seen);
       }
+      const right = d.value === truth;
       let label;
-      if (d.status === 'verified') {
-        const ok = d.value === truth;
-        if (!ok) wrongVerified++;
-        label = (ok ? 'VERIFIED' : 'VERIFIED-WRONG!') + ` ${d.value} (${d.evidence}, ${seen.length}f)`;
+      if (d.status === 'accepted') {
+        if (!right) wrong++;
+        label = `${right ? 'OK' : 'WRONG!'} ${d.value} (${d.evidence}, ${got.length}f)`;
       } else {
-        label = `ask:${d.reason} guess=${d.value == null ? '—' : d.value}${d.value === truth ? '✓' : ''} (${seen.length}f)`;
+        label = `${d.status} ${d.value == null ? '—' : d.value}${right ? '✓' : ''} (${got.length}f)`;
       }
-      totals[name][d.status === 'verified' ? 'verified' : 'ask'] = (totals[name][d.status === 'verified' ? 'verified' : 'ask'] || 0) + 1;
-      row.push(`${name}: ${label}`.padEnd(name === 'match' ? 52 : 46));
+      const k = d.status === 'accepted' ? (right ? 'accepted right' : 'ACCEPTED WRONG') : d.status + (right ? ' (guess right)' : '');
+      totals[name] = totals[name] || {};
+      totals[name][k] = (totals[name][k] || 0) + 1;
+      row.push(`${name}: ${label}`.padEnd(38));
     }
     console.log(row.join(' '));
   }
   console.log('\nby scenario:', JSON.stringify(totals));
-  console.log(`wrong values auto-verified: ${wrongVerified}`);
+  console.log(`wrong prices auto-accepted: ${wrong}`);
   console.log(`OCR reads: ${reads}, average ${Math.round(readMs / reads)} ms each (this machine, native ONNX Runtime)`);
 })().catch(e => { console.error(e); process.exit(1); });
