@@ -160,10 +160,23 @@
   function nextAttempt(frames) {
     var n = frames.length, last = frames[n - 1], prev = frames[n - 2];
     if (!last) return { avoid: [], flip: false };
-    if (last.found) return { avoid: [], prefer: last.skew, flip: !!last.flip };
+    // No USP line on this label: the reading only needs repeating, not the whole label.
+    if (last.found) return { avoid: [], prefer: last.skew, flip: !!last.flip, quick: last.value != null && !last.check };
     if (Math.abs(last.skew || 0) >= 45 && !last.flip) return { avoid: [], flip: true };
     if (prev && !prev.found && !prev.flip && angleGap(prev.skew, last.skew) < 10) return { avoid: [last.skew], flip: false };
     return { avoid: [], flip: false };
+  }
+
+  // When the reader can stop part-way through a label: this frame alone would count, or
+  // (quick) a further reading is all that is still needed.
+  function stopRule(seen, quick) {
+    return function (lines) {
+      var r = assess(lines, seen);
+      if (r.value == null) return false;
+      if (r.usp) return true;
+      if (r.conflict || r.conf < MIN_CONF) return false;
+      return !!quick || inList(seen, r.value);
+    };
   }
 
   /* Combine the frames read so far for one product.
@@ -215,7 +228,7 @@
 
   var api = {
     readMrp: readMrp, readUspCheck: readUspCheck, assess: assess, decide: decide,
-    nextAttempt: nextAttempt, format: format, MAX_FRAMES: MAX_FRAMES
+    nextAttempt: nextAttempt, stopRule: stopRule, format: format, MAX_FRAMES: MAX_FRAMES
   };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   else root.Mrp = api;

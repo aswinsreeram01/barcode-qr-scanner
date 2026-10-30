@@ -1,4 +1,4 @@
-/* Writes a one-sheet .xlsx file: a zip of a few XML parts, stored uncompressed.
+/* Writes an .xlsx file: a zip of a few XML parts, stored uncompressed.
  * Strings stay text, so barcodes keep their leading zeros in Excel. */
 (function (root) {
   'use strict';
@@ -26,6 +26,7 @@
     var rows = sheet.rows.map(function (row, r) {
       var cells = row.map(function (v, i) {
         var ref = colName(i) + (r + 2);
+        if (v == null || v === '') return '';
         if (typeof v === 'number') {
           return '<c r="' + ref + '"' + (sheet.columns[i].money ? ' s="' + STYLE_MONEY + '"' : '') + '><v>' + v + '</v></c>';
         }
@@ -38,7 +39,7 @@
       '<cols>' + cols + '</cols><sheetData><row r="1">' + head + '</row>' + rows + '</sheetData></worksheet>';
   }
 
-  function parts(sheet) {
+  function parts(sheets) {
     var main = 'http://schemas.openxmlformats.org/spreadsheetml/2006/main';
     var rel = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships';
     var head = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>';
@@ -47,16 +48,22 @@
         '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>' +
         '<Default Extension="xml" ContentType="application/xml"/>' +
         '<Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>' +
-        '<Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>' +
+        sheets.map(function (s, i) {
+          return '<Override PartName="/xl/worksheets/sheet' + (i + 1) + '.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>';
+        }).join('') +
         '<Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/>' +
         '</Types>'],
       ['_rels/.rels', head + '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">' +
         '<Relationship Id="rId1" Type="' + rel + '/officeDocument" Target="xl/workbook.xml"/></Relationships>'],
       ['xl/workbook.xml', head + '<workbook xmlns="' + main + '" xmlns:r="' + rel + '"><sheets>' +
-        '<sheet name="' + esc(sheet.name) + '" sheetId="1" r:id="rId1"/></sheets></workbook>'],
+        sheets.map(function (s, i) {
+          return '<sheet name="' + esc(s.name) + '" sheetId="' + (i + 1) + '" r:id="rId' + (i + 1) + '"/>';
+        }).join('') + '</sheets></workbook>'],
       ['xl/_rels/workbook.xml.rels', head + '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">' +
-        '<Relationship Id="rId1" Type="' + rel + '/worksheet" Target="worksheets/sheet1.xml"/>' +
-        '<Relationship Id="rId2" Type="' + rel + '/styles" Target="styles.xml"/></Relationships>'],
+        sheets.map(function (s, i) {
+          return '<Relationship Id="rId' + (i + 1) + '" Type="' + rel + '/worksheet" Target="worksheets/sheet' + (i + 1) + '.xml"/>';
+        }).join('') +
+        '<Relationship Id="rId' + (sheets.length + 1) + '" Type="' + rel + '/styles" Target="styles.xml"/></Relationships>'],
       ['xl/styles.xml', head + '<styleSheet xmlns="' + main + '">' +
         '<fonts count="2"><font><sz val="11"/><name val="Calibri"/></font><font><b/><sz val="11"/><name val="Calibri"/></font></fonts>' +
         '<fills count="2"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill></fills>' +
@@ -65,9 +72,10 @@
         '<cellXfs count="3"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/>' +
         '<xf numFmtId="0" fontId="1" fillId="0" borderId="0" xfId="0" applyFont="1"/>' +
         '<xf numFmtId="2" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1"/></cellXfs>' +
-        '</styleSheet>'],
-      ['xl/worksheets/sheet1.xml', sheetXml(sheet)]
-    ];
+        '</styleSheet>']
+    ].concat(sheets.map(function (s, i) {
+      return ['xl/worksheets/sheet' + (i + 1) + '.xml', sheetXml(s)];
+    }));
   }
 
   /* ---------- zip (stored, no compression) ---------- */
@@ -127,7 +135,7 @@
     return out;
   }
 
-  function build(sheet, when) { return zip(parts(sheet), when || new Date()); }
+  function build(sheets, when) { return zip(parts(sheets), when || new Date()); }
 
   var api = { build: build, MIME: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;

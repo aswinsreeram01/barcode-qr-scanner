@@ -550,31 +550,18 @@ html, body {
 .frame.label { width: 94%; aspect-ratio: 1.55; }
 .frame.label .scanline { display: none; }
 
-/* ---------- audit: strip on the camera view ---------- */
-/* A slim strip at the top, so the frame below it stays in view. */
+/* ---------- audit: messages, below the camera ---------- */
+/* Room is kept for two lines of text so the camera view does not jump as they change. */
 .audit {
-  position: absolute;
-  inset: 0;
-  display: flex;
-  align-items: flex-start;
-  justify-content: center;
-  padding: 8px;
-  z-index: 3;
-  pointer-events: none;
+  flex: none;
+  min-height: 74px;
+  background: var(--panel-2);
+  border-top: 1px solid var(--line);
 }
-.audit-card {
-  pointer-events: auto;
-  width: 100%;
-  max-width: 440px;
-  background: rgba(19, 25, 34, .95);
-  border: 1px solid var(--line);
-  border-radius: var(--radius);
-  box-shadow: 0 10px 30px rgba(0, 0, 0, .5);
-  padding: 8px 12px 10px;
-  animation: confirmIn .16s ease-out;
-}
-.audit-card.ok { border-color: rgba(88, 245, 200, .6); }
-.audit-card.warn { border-color: rgba(255, 204, 102, .6); }
+.audit:not([hidden]) ~ .panel { max-height: 38dvh; }
+.audit-card { padding: 7px 16px 9px; }
+.audit-card.warn .audit-status { color: #ffe0a3; }
+.audit-code:empty { display: none; }
 .audit-top { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-height: 26px; }
 .audit-step {
   font-size: 11px;

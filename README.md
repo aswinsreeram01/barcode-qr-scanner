@@ -29,9 +29,15 @@ Every scan is one unit of a product, and the audit ends with a count for each.
    - both in one view counts as **one scan**;
    - otherwise it is **two scans**: the barcode is held on screen for as long as it takes
      to bring the MRP into the frame.
-3. **End audit** downloads `audit-<date>-<time>.xlsx`, with `Barcode`, `MRP` and `Count`
-   columns. The list then locks; **Download Excel** fetches the file again until a new
-   audit starts.
+3. **End audit** downloads `audit-<date>-<time>.xlsx`. The list then locks; **Download
+   Excel** fetches the file again until a new audit starts. The file has three sheets:
+   - **Audit**: `Barcode`, `MRP` and `Count`, the result of the audit;
+   - **Scans**: every unit with the time its barcode was read, the time it was counted,
+     how long that took and how long each read took;
+   - **Device**: audit start and end, reader threads, CPU cores and browser.
+
+Send the file along when reporting a slow or wrong scan: the Scans and Device sheets show
+what happened on the phone. Nothing is sent anywhere by the app itself.
 
 ### Telling you what needs a rescan
 
@@ -76,8 +82,18 @@ PaddleOCR (PP-OCRv4) text detection and recognition models running on ONNX Runti
 in a Web Worker. The label's angle is measured from the text lines themselves, so tilted
 and sideways labels are straightened without needing a barcode in view. The ~27 MB of
 model and runtime files download once and are then kept in the browser's Cache Storage,
-so later visits and offline use skip the download. One reading takes about 1–3 s on a
-desktop browser; expect longer on a phone.
+so later visits and offline use skip the download.
+
+Two things keep it quick:
+
+- **It stops early.** Text lines are read from the bottom of the label up, and reading
+  stops once the price lines are in hand. Labels with the MRP near the top gain less.
+- **It uses up to 4 threads.** Threads need cross-origin isolation, which GitHub Pages
+  cannot switch on, so `isolate-sw.js` adds the headers and the first visit reloads
+  itself once. It changes headers only and stores nothing. Without support the reader
+  runs on one thread.
+
+A read takes under a second in a desktop browser; expect longer on a phone.
 
 ## Features
 
@@ -148,6 +164,9 @@ unit, and with a different price already counted, which must not attract the rea
 cd test && npm install && npm run bench
 ```
 
+Set `NO_EARLY=1` to read whole labels and `THREADS=4` to use several threads, for comparing
+timings.
+
 Photos go in `samples/` (not committed), named `NN_description_MRP-<amount>.jpg`; the
 `CROPS` table in the script says where the label sits in each photo.
 
@@ -161,6 +180,8 @@ js/mrp.js               MRP parsing, USP cross-check and the rules for counting 
 js/xlsx.js              writes the audit's Excel file
 js/ocr-core.js          text reader: angle estimate, straightening, PaddleOCR detect + recognise
 js/ocr-worker.js        runs the text reader in a Web Worker, caches the models
+js/isolate.js           registers isolate-sw.js, which the reader's threads depend on
+isolate-sw.js           service worker adding the cross-origin isolation headers
 vendor/zxing-wasm/      zxing-wasm 2.2.4 (zxing-cpp WebAssembly reader) — main decoder
 vendor/zxing.min.js     @zxing/library 0.21.3 UMD build (last-resort fallback)
 vendor/onnxruntime-web/ ONNX Runtime Web 1.22.0, wasm build
