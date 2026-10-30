@@ -49,7 +49,7 @@
         <path d="M3.5 12h17"/>
       </svg>
       <p class="idle-title">Ready to scan</p>
-      <p class="idle-sub">Tap <strong>Start scanning</strong>, then hold codes up one after another.</p>
+      <p class="idle-sub">Tap the button below, then hold codes up one after another.</p>
       <p class="idle-sub">Small or blurry code? Zoom in instead of moving closer, and tap the preview to refocus.</p>
     </div>
 
@@ -81,28 +81,18 @@
     <div class="audit" id="audit" hidden>
       <div class="audit-card" id="auditCard" role="status" aria-live="polite">
         <div class="audit-top">
-          <span class="audit-step" id="auditStep">Now show the MRP</span>
-          <span class="audit-actions" id="auditActions">
-            <button type="button" class="pill" id="auditPhotoBtn">Photo</button>
-            <button type="button" class="pill" id="auditPickBtn">Choose MRP</button>
-          </span>
-          <button type="button" class="linkbtn" id="auditCancel">Cancel</button>
-        </div>
-        <div class="audit-what">
-          <span class="audit-product" id="auditProduct"></span>
-          <span class="audit-allowed" id="auditAllowed"></span>
+          <span class="audit-step" id="auditStep"></span>
+          <button type="button" class="linkbtn" id="auditCancel"></button>
         </div>
         <div class="audit-code" id="auditCode"></div>
         <div class="audit-status" id="auditStatus"></div>
-        <div class="audit-choices" id="auditChoices" hidden></div>
         <form class="audit-other" id="auditOther" hidden>
           <input type="text" inputmode="decimal" autocomplete="off" id="auditOtherInput" placeholder="MRP as printed, e.g. 3300" aria-label="MRP as printed on the label">
-          <button type="submit" class="btn primary">Save</button>
+          <button type="submit" class="pill">Save</button>
         </form>
-        <img class="audit-shot" id="auditShot" alt="The label as the camera saw it" hidden>
+        <div class="audit-actions" id="auditActions"></div>
       </div>
     </div>
-    <input type="file" accept="image/*" id="auditPhoto" hidden>
 
     <div class="flash" id="flash" aria-hidden="true"></div>
   </main>
@@ -148,28 +138,21 @@
     </section>
 
     <section id="auditSection" hidden>
-      <div class="refbar">
-        <div class="ref-info">
-          <b id="refTitle">No reference list</b>
-          <span id="refSub">Import a CSV with barcode and MRP columns from your stock system.</span>
+      <div class="audit-bar">
+        <div class="audit-info">
+          <b id="auditTitle"></b>
+          <span id="auditSub"></span>
         </div>
-        <div class="ref-actions">
-          <button type="button" class="btn small" id="refImportBtn">Import CSV</button>
-          <button type="button" class="linkbtn" id="refRemoveBtn" hidden>Remove</button>
-        </div>
-        <input type="file" accept=".csv,.txt,text/csv,text/plain" id="refFile" hidden>
+        <button type="button" class="btn small" id="auditEndBtn" hidden>End audit</button>
+        <button type="button" class="btn small" id="auditDownloadBtn" hidden>Download Excel</button>
       </div>
       <p class="ocr-state" id="ocrState" hidden></p>
 
       <div class="history-head">
-        <h2>Audit <span class="count" id="auditUnits">0</span></h2>
-        <div class="head-actions">
-          <button type="button" class="linkbtn" id="auditExportBtn" hidden>Export CSV</button>
-          <button type="button" class="linkbtn" id="auditClearBtn" hidden>Clear</button>
-        </div>
+        <h2>Units <span class="count" id="auditUnits">0</span></h2>
       </div>
       <ul class="history audit-list" id="auditList"></ul>
-      <p class="empty" id="auditEmpty">Scan a barcode, then show its MRP label. Each unit lands here with how its MRP was checked.</p>
+      <p class="empty" id="auditEmpty">Every barcode + price you scan lands here with its count. Both in one view is one scan; otherwise scan the barcode, then the price.</p>
     </section>
 
     <footer class="foot">
@@ -184,7 +167,7 @@
 </noscript>
 
 <script src="js/mrp.js"></script>
-<script src="js/reference.js"></script>
+<script src="js/xlsx.js"></script>
 <script src="js/app.js"></script>
 </body>
 </html>

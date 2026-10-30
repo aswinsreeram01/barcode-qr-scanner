@@ -1,9 +1,9 @@
 /* Barcode & QR scanner — rapid multi-scan, fully client-side.
  * Decoding: native BarcodeDetector on Android (ML Kit-backed), the zxing-cpp
  * WebAssembly port everywhere else, with the old JS port as a last resort.
- * Audit mode adds an on-device MRP reader (js/ocr-worker.js) checked against a
- * reference list of barcode → MRPs (js/reference.js, rules in js/mrp.js). */
-/* global Mrp, Reference */
+ * Audit mode counts units per barcode + price, reading the price on the device
+ * (js/ocr-worker.js, rules in js/mrp.js) and exporting to Excel (js/xlsx.js). */
+/* global Mrp, Xlsx */
 (function () {
   'use strict';
 
@@ -20,11 +20,12 @@
   var MAX_HISTORY = 200;
   var HISTORY_KEY = 'scan.history.v1';
   var MODE_KEY = 'scan.mode.v1';
-  var AUDIT_KEY = 'scan.audit.v1';
+  var AUDIT_KEY = 'scan.audit.v2';
   var OCR_MAX_EDGE = 1280;      // label crop handed to the text reader
   var OCR_PAD = 0.12;           // read a margin round the frame: USP lines sit at label edges
-  var PHOTO_MAX_EDGE = 2000;    // a chosen photo is mostly not label, so keep more pixels
-  var AUDIT_DONE_MS = 1400;     // how long a recorded MRP stays on screen
+  var COUNTED_MS = 3000;        // how long Edit / Undo stay up after a unit is counted
+  var NO_BARCODE_HINT_MS = 8000;// no barcode for this long: tell the person how to help
+  var DUPE_HINT_MS = 2500;
 
   function $(id) { return document.getElementById(id); }
 
@@ -45,15 +46,11 @@
     historyEmpty: $('historyEmpty'), clearBtn: $('clearBtn'), exportBtn: $('exportBtn'),
     scanSection: $('scanSection'), auditSection: $('auditSection'),
     audit: $('audit'), auditCard: $('auditCard'), auditStep: $('auditStep'),
-    auditCancel: $('auditCancel'), auditProduct: $('auditProduct'), auditCode: $('auditCode'),
-    auditAllowed: $('auditAllowed'), auditStatus: $('auditStatus'), auditShot: $('auditShot'),
-    auditChoices: $('auditChoices'), auditOther: $('auditOther'), auditOtherInput: $('auditOtherInput'),
-    auditActions: $('auditActions'), auditPhotoBtn: $('auditPhotoBtn'), auditPickBtn: $('auditPickBtn'),
-    auditPhoto: $('auditPhoto'),
-    refTitle: $('refTitle'), refSub: $('refSub'), refImportBtn: $('refImportBtn'),
-    refRemoveBtn: $('refRemoveBtn'), refFile: $('refFile'), ocrState: $('ocrState'),
-    auditUnits: $('auditUnits'), auditList: $('auditList'), auditEmpty: $('auditEmpty'),
-    auditExportBtn: $('auditExportBtn'), auditClearBtn: $('auditClearBtn')
+    auditCancel: $('auditCancel'), auditCode: $('auditCode'), auditStatus: $('auditStatus'),
+    auditOther: $('auditOther'), auditOtherInput: $('auditOtherInput'), auditActions: $('auditActions'),
+    auditTitle: $('auditTitle'), auditSub: $('auditSub'), auditEndBtn: $('auditEndBtn'),
+    auditDownloadBtn: $('auditDownloadBtn'), ocrState: $('ocrState'),
+    auditUnits: $('auditUnits'), auditList: $('auditList'), auditEmpty: $('auditEmpty')
   };
 
   var state = {
@@ -70,8 +67,9 @@
     lastValue: '', lastAt: 0,
     timer: null, confirmTimer: null,
     history: [],
-    // audit: the product in hand ({ step: 'barcode' | 'mrp' | 'ask' | 'done', item, frames })
-    audit: { step: 'barcode' }, auditTimer: null, auditLines: [], reference: null,
+    // session: the audit (see "audit: session"); audit: the product in hand
+    session: null, audit: { step: 'barcode' }, auditTimer: null, rowEdit: null,
+    armedAt: 0, dupeAt: 0, dupeTimer: null,
     ocr: { worker: null, ready: false, error: '', seq: 0, waiting: {} }
   };
 
@@ -512,6 +510,12 @@
     state.lastHitAt = now;
     if (value === state.lastValue && now - state.lastAt < DUPE_WINDOW_MS) {
       state.lastAt = now;
+      if (state.mode === 'audit') {
+        state.dupeAt = state.armedAt = now;
+        updateArmed();
+        window.clearTimeout(state.dupeTimer);
+        state.dupeTimer = window.setTimeout(updateArmed, DUPE_HINT_MS + 50);
+      }
       return;
     }
     state.lastValue = value;
@@ -521,7 +525,7 @@
     feedback();
 
     if (state.mode === 'audit') {
-      auditBarcode(entry);
+      if (auditActive()) auditBarcode(entry);
     } else if (state.mode === 'confirm') {
       state.pending = entry;
       state.paused = true;
@@ -587,7 +591,13 @@
   }
 
   function updateArmed() {
-    el.armed.hidden = !(state.running && !state.paused && el.confirm.hidden && state.sessionCount > 0);
+    var audit = state.mode === 'audit', now = Date.now();
+    el.armed.textContent = !audit ? 'Ready for the next code'
+      : now - state.dupeAt < DUPE_HINT_MS ? 'Same barcode — take it out of view to count another'
+      : now - state.armedAt >= NO_BARCODE_HINT_MS ? 'No barcode yet — hold it flat, zoom or use the flash'
+      : 'Scan a barcode';
+    el.armed.hidden = !(state.running && !state.paused && el.confirm.hidden && el.audit.hidden &&
+                        (audit || state.sessionCount > 0));
   }
 
   /* ---------------- feedback ---------------- */
@@ -738,16 +748,16 @@
     var o = state.ocr;
     if (o.worker || o.error) return;
     if (!window.Worker || !window.WebAssembly) {
-      o.error = 'This browser cannot run the MRP reader.';
+      o.error = 'This browser cannot run the price reader.';
       renderOcrState();
       return;
     }
     try { o.worker = new Worker('js/ocr-worker.js'); }
-    catch (e) { o.error = 'The MRP reader could not start.'; renderOcrState(); return; }
+    catch (e) { o.error = 'The price reader could not start.'; renderOcrState(); return; }
     o.worker.onmessage = function (ev) {
       var m = ev.data || {};
       if (m.type === 'ready') { o.ready = true; renderOcrState(); }
-      else if (m.type === 'error') { o.error = 'The MRP reader did not load (' + m.message + ').'; readerFailed(); }
+      else if (m.type === 'error') { o.error = 'The price reader did not load (' + m.message + ').'; renderOcrState(); }
       else if (m.type === 'result' && o.waiting[m.id]) {
         var cb = o.waiting[m.id];
         delete o.waiting[m.id];
@@ -755,16 +765,10 @@
       }
     };
     o.worker.onerror = function (e) {
-      o.error = 'The MRP reader stopped' + (e && e.message ? ' (' + e.message + ')' : '') + '.';
-      readerFailed();
+      o.error = 'The price reader stopped' + (e && e.message ? ' (' + e.message + ')' : '') + '.';
+      renderOcrState();
     };
     renderOcrState();
-  }
-
-  function readerFailed() {
-    renderOcrState();
-    var a = state.audit;
-    if (a.step === 'mrp' && !a.busy) askPerson(a, { reason: 'unreadable', value: null });
   }
 
   function ocrRead(img, opts) {
@@ -779,37 +783,137 @@
 
   function renderOcrState() {
     var o = state.ocr, msg = '', warn = false;
-    if (o.error) { msg = o.error + ' You can still choose each MRP by hand.'; warn = true; }
-    else if (o.worker && !o.ready) msg = 'Loading the MRP reader… first time only, about 27 MB.';
+    if (o.error) { msg = o.error + ' You can still type each price.'; warn = true; }
+    else if (o.worker && !o.ready) msg = 'Loading the price reader… first time only, about 27 MB.';
     el.ocrState.textContent = msg;
     el.ocrState.className = 'ocr-state' + (warn ? ' warn' : '');
     el.ocrState.hidden = !msg;
-    if (state.audit.step === 'mrp') renderAuditStatus();
+    if (state.audit.step === 'mrp') renderAuditCard();
+  }
+
+  /* ---------------- audit: session ---------------- */
+  // session: { startedAt, endedAt, scans: [{ code, mrp, at, how }] }. A product is its
+  // barcode + price; every scan is one unit of that product.
+
+  function auditActive() { return !!state.session && !state.session.endedAt; }
+
+  // EAN-13 "0691027644058" and UPC-A "691027644058" are the same product, and engines
+  // disagree on which they report.
+  function normCode(code) {
+    var s = String(code).trim();
+    return /^\d+$/.test(s) ? s.replace(/^0+(?=\d)/, '') : s;
+  }
+
+  function productKey(code, mrp) { return normCode(code) + '|' + mrp.toFixed(2); }
+
+  function auditProducts() {
+    var map = {}, list = [];
+    (state.session ? state.session.scans : []).forEach(function (s) {
+      var k = productKey(s.code, s.mrp), p = map[k];
+      if (!p) { p = map[k] = { key: k, code: s.code, mrp: s.mrp, qty: 0, last: 0 }; list.push(p); }
+      p.qty += 1;
+      p.last = s.at;
+    });
+    return list.sort(function (a, b) { return b.last - a.last; });
+  }
+
+  function pricesCounted(code) {
+    var n = normCode(code), out = [];
+    state.session.scans.forEach(function (s) {
+      if (normCode(s.code) === n && out.indexOf(s.mrp) < 0) out.push(s.mrp);
+    });
+    return out;
+  }
+
+  function loadSession() {
+    try {
+      window.localStorage.removeItem('scan.audit.v1');
+      var s = JSON.parse(window.localStorage.getItem(AUDIT_KEY) || 'null');
+      if (s && Array.isArray(s.scans)) state.session = s;
+    } catch (e) { state.session = null; }
+  }
+
+  function saveSession() {
+    try {
+      if (state.session) window.localStorage.setItem(AUDIT_KEY, JSON.stringify(state.session));
+      else window.localStorage.removeItem(AUDIT_KEY);
+    } catch (e) {}
+  }
+
+  function startNewAudit() {
+    var old = state.session;
+    if (old && old.scans.length &&
+        !window.confirm('Start a new audit? The last one (' + old.scans.length + ' units) will be cleared from this phone. Its Excel file is not affected.')) return;
+    state.session = { startedAt: Date.now(), endedAt: 0, scans: [] };
+    state.rowEdit = null;
+    saveSession();
+    renderAudit();
+    start();
+  }
+
+  function endAudit() {
+    var s = state.session, n = s.scans.length;
+    if (!n) {
+      if (!window.confirm('Nothing has been scanned. Discard this audit?')) return;
+      if (state.running) stop();
+      state.session = null;
+      saveSession();
+      renderAudit();
+      return;
+    }
+    if (!window.confirm('End this audit with ' + n + ' units of ' + auditProducts().length + ' products? The Excel file downloads now, and no more scans can be added.')) return;
+    if (state.running) stop();
+    s.endedAt = Date.now();
+    state.rowEdit = null;
+    saveSession();
+    renderAudit();
+    downloadExcel();
+  }
+
+  function stamp(ms) {
+    var d = new Date(ms), p = function (n) { return (n < 10 ? '0' : '') + n; };
+    return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate()) + '-' + p(d.getHours()) + p(d.getMinutes());
+  }
+
+  function downloadExcel() {
+    var rows = auditProducts().sort(function (a, b) {
+      return a.code < b.code ? -1 : a.code > b.code ? 1 : a.mrp - b.mrp;
+    }).map(function (p) { return [p.code, p.mrp, p.qty]; });
+    var bytes = Xlsx.build({
+      name: 'Audit',
+      columns: [{ title: 'Barcode', width: 20 }, { title: 'MRP', width: 12, money: true }, { title: 'Count', width: 10 }],
+      rows: rows
+    });
+    var link = document.createElement('a');
+    link.href = URL.createObjectURL(new Blob([bytes], { type: Xlsx.MIME }));
+    link.download = 'audit-' + stamp(state.session.endedAt || Date.now()) + '.xlsx';
+    document.body.appendChild(link);
+    link.click();
+    window.setTimeout(function () { URL.revokeObjectURL(link.href); link.remove(); }, 1000);
   }
 
   /* ---------------- audit: one product at a time ---------------- */
-  // barcode → 'mrp' (reading the label) → 'done' (recorded) or 'ask' (the person decides)
+  // Barcode first, then the price. Both in one view is one scan; otherwise the barcode
+  // is held on screen, however long the price takes. Steps:
+  //   'barcode' waiting for a code · 'mrp' reading the price · 'done' just counted (the
+  //   next barcode can already be scanned) · 'edit' correcting what was just counted
 
   var EVIDENCE = {
-    'ref+usp': 'matches the reference, and the label’s USP line agrees',
-    'ref+repeat': 'matches the reference, read the same twice',
-    'usp': 'the label’s USP line agrees'
+    usp: 'the label’s USP line agrees',
+    seen: 'same price as earlier units',
+    repeat: 'read the same twice',
+    accepted: 'as read',
+    typed: 'typed in'
   };
-
-  function allowedFor(item) { return item && item.ref ? item.ref.mrps : null; }
 
   function auditBarcode(entry) {
     state.paused = true;
     window.clearTimeout(state.timer);
-    state.audit = {
-      step: 'mrp', frames: [], busy: false, shot: '',
-      item: { code: entry.value, format: entry.format, ref: Reference.lookup(state.reference, entry.value) }
-    };
+    state.audit = { step: 'mrp', code: entry.value, frames: [], busy: false, typing: false, decision: null };
     el.frame.classList.add('label');
-    el.armed.hidden = true;
     ensureOcr();
     renderAuditCard();
-    scheduleMrp(600);   // a moment to turn the pack to its MRP side
+    scheduleMrp(300);
   }
 
   function scheduleMrp(delay) {
@@ -819,402 +923,340 @@
 
   function mrpTick() {
     var a = state.audit;
-    if (!state.running || a.step !== 'mrp' || a.busy || a.photo || state.ocr.error) return;
-    if (!state.ocr.ready) { renderAuditStatus(); scheduleMrp(300); return; }
+    if (!state.running || a.step !== 'mrp' || a.busy || a.typing || state.ocr.error) return;
+    if (!state.ocr.ready) { scheduleMrp(300); return; }
     if (!captureRegion(ocrCanvas, ocrCtx, OCR_MAX_EDGE, OCR_PAD)) { scheduleMrp(200); return; }
-    readLabel(a, ocrCanvas, Mrp.nextAttempt(a.frames), null, false);
-  }
-
-  // One pass of the text reader over `cv`, folded into this product's frames.
-  function readLabel(a, cv, plan, detMax, isPhoto) {
     var img;
-    try { img = cv.getContext('2d').getImageData(0, 0, cv.width, cv.height); }
-    catch (e) { if (!isPhoto) scheduleMrp(200); return; }
-    var shot = cv.toDataURL('image/jpeg', 0.75);
-    var opts = { avoid: plan.avoid, prefer: plan.prefer, flip: plan.flip };
-    if (detMax) opts.detMax = detMax;
+    try { img = ocrCtx.getImageData(0, 0, ocrCanvas.width, ocrCanvas.height); }
+    catch (e) { scheduleMrp(200); return; }
+    var plan = Mrp.nextAttempt(a.frames);
     a.busy = true;
-    renderAuditStatus();
-    ocrRead(img, opts).then(function (res) {
+    ocrRead(img, plan).then(function (res) {
       a.busy = false;
-      if (state.audit !== a || a.step !== 'mrp') return;
-      var allowed = allowedFor(a.item);
-      var r = Mrp.assess(res.lines, allowed);
+      if (state.audit !== a || a.step !== 'mrp' || a.typing) return;
+      var seen = pricesCounted(a.code);
+      var r = Mrp.assess(res.lines, seen);
       r.skew = res.skew;
       r.flip = plan.flip;
       a.frames.push(r);
-      if (r.found || !a.shot) a.shot = shot;   // keep a frame that shows the MRP
-      var d = Mrp.decide(a.frames, allowed);
-      if (d.status === 'verified') record(a, d.value, 'label', d.evidence);
-      else if (d.status === 'ask') askPerson(a, d);
-      else if (isPhoto) askPerson(a, { reason: r.value == null ? 'unreadable' : 'unconfirmed', value: r.value });
-      else { renderAuditStatus(); scheduleMrp(60); }
+      if (a.frames.length > Mrp.MAX_FRAMES + 1) a.frames.shift();
+      var d = Mrp.decide(a.frames, seen);
+      if (d.status === 'accepted') { countUnit(a.code, d.value, d.evidence); return; }
+      a.decision = d;
+      renderAuditCard();
+      // Not coming yet: the pack may still be being turned, so keep looking, more gently.
+      scheduleMrp(d.status === 'pending' ? 60 : 500);
     }, function (err) {
       a.busy = false;
-      if (state.audit !== a) return;
-      state.ocr.error = 'The MRP reader failed (' + err.message + ').';
+      state.ocr.error = 'The price reader failed (' + err.message + ').';
       renderOcrState();
-      askPerson(a, { reason: 'unreadable', value: null });
     });
   }
 
-  // A photo from the phone's own camera app: sharper focus than the live preview.
-  function readPhoto(file) {
-    var a = state.audit;
-    if (!file || !a.item) return;
-    ensureOcr();
-    var url = URL.createObjectURL(file);
-    var img = new Image();
-    img.onload = function () {
-      URL.revokeObjectURL(url);
-      var k = Math.min(1, PHOTO_MAX_EDGE / Math.max(img.naturalWidth, img.naturalHeight));
-      var cv = document.createElement('canvas');
-      cv.width = Math.round(img.naturalWidth * k);
-      cv.height = Math.round(img.naturalHeight * k);
-      cv.getContext('2d').drawImage(img, 0, 0, cv.width, cv.height);
-      window.clearTimeout(state.auditTimer);
-      a.step = 'mrp';
-      a.photo = true;
-      renderAuditCard();
-      (function go() {
-        if (state.audit !== a) return;
-        if (state.ocr.error) { askPerson(a, { reason: 'unreadable', value: null }); return; }
-        if (!state.ocr.ready || a.busy) { window.setTimeout(go, 300); return; }
-        readLabel(a, cv, Mrp.nextAttempt([]), 1600, true);
-      })();
-    };
-    img.onerror = function () {
-      URL.revokeObjectURL(url);
-      setNotice('That photo could not be opened.', 'warn');
-    };
-    img.src = url;
-  }
-
-  function askPerson(a, d) {
-    if (state.audit !== a) return;
-    window.clearTimeout(state.auditTimer);
-    a.step = 'ask';
-    a.ask = d;
-    renderAuditCard();
-    feedback(true);
-  }
-
-  // how: 'label' (verified automatically) or 'person' (chosen on the ask card)
-  function record(a, value, how, evidence) {
-    var ref = a.item.ref;
-    var refState = !state.reference ? 'no-reference'
-      : !ref ? 'barcode-unknown'
-      : Mrp.inList(ref.mrps, value) ? 'match' : 'mrp-mismatch';
-    var key = Reference.normCode(a.item.code) + '|' + value;
-    var now = Date.now(), line = null;
-    for (var i = 0; i < state.auditLines.length; i++) {
-      if (state.auditLines[i].key === key) { line = state.auditLines.splice(i, 1)[0]; break; }
-    }
-    if (!line) {
-      line = { key: key, code: a.item.code, name: ref ? ref.name : '', mrp: value,
-               refState: refState, qty: 0, byLabel: 0, byPerson: 0, first: now, last: now };
-    }
-    state.auditLines.unshift(line);
-    line.qty += 1;
-    line.last = now;
-    if (how === 'label') line.byLabel += 1; else line.byPerson += 1;
-    saveAudit();
+  function countUnit(code, mrp, how) {
+    var scan = { code: code, mrp: mrp, at: Date.now(), how: how };
+    state.session.scans.push(scan);
+    saveSession();
     renderAudit();
-
     state.sessionCount += 1;
     el.sessionCount.textContent = String(state.sessionCount);
     el.sessionChip.hidden = false;
+    feedback();
+    showCounted(scan);
+  }
 
+  // The card stays up for a moment for Edit / Undo, but the next barcode can already scan.
+  function showCounted(scan) {
     window.clearTimeout(state.auditTimer);
-    a.step = 'done';
-    a.result = { value: value, how: how, evidence: evidence, refState: refState };
+    state.audit = { step: 'done', code: scan.code, scan: scan };
+    // The pack is still in hand: reading the price outlasted the window set by its barcode.
+    state.lastValue = scan.code;
+    state.lastAt = Date.now();
+    resumeBarcode();
     renderAuditCard();
-    var flagged = refState !== 'match';
-    if (how === 'label') feedback(flagged);
+    var a = state.audit;
     state.auditTimer = window.setTimeout(function () {
-      if (state.audit === a) auditReset();
-    }, AUDIT_DONE_MS + (flagged ? 1000 : 0));
+      if (state.audit === a) { state.audit = { step: 'barcode' }; renderAuditCard(); }
+    }, COUNTED_MS);
+  }
+
+  function resumeBarcode() {
+    el.frame.classList.remove('label');
+    state.armedAt = Date.now();
+    window.setTimeout(updateArmed, NO_BARCODE_HINT_MS + 50);
+    if (state.running && state.paused) { state.paused = false; schedule(0); }
   }
 
   function auditReset() {
     window.clearTimeout(state.auditTimer);
-    var a = state.audit;
     state.audit = { step: 'barcode' };
-    el.audit.hidden = true;
-    el.audit.classList.remove('blocking');
-    el.frame.classList.remove('label');
-    // The same pack is still in hand — do not count it again straight away.
-    if (a.item) { state.lastValue = a.item.code; state.lastAt = Date.now(); }
-    if (state.running && state.paused) { state.paused = false; schedule(0); }
-    updateArmed();
+    resumeBarcode();
+    renderAuditCard();
+  }
+
+  // Rescan: the code just read must be readable again straight away.
+  function rescanBarcode() {
+    state.lastValue = '';
+    auditReset();
+  }
+
+  function auditCancel() {
+    var a = state.audit;
+    if (a.step === 'edit' || a.typing) closeTyping();
+    else if (a.step === 'mrp') rescanBarcode();
+  }
+
+  function parsePrice(text) {
+    var s = String(text).replace(/₹|rs\.?|\/-|[,\s]/gi, '');
+    if (!/^\d+(\.\d{1,2})?$/.test(s)) return null;
+    var v = Math.round(parseFloat(s) * 100) / 100;
+    return v > 0 ? v : null;
+  }
+
+  function submitPrice(ev) {
+    ev.preventDefault();
+    var a = state.audit, v = parsePrice(el.auditOtherInput.value);
+    if (v == null) { el.auditOtherInput.focus(); el.auditOtherInput.select(); return; }
+    if (a.step === 'mrp') {
+      countUnit(a.code, v, 'typed');
+    } else if (a.step === 'edit') {
+      a.scan.mrp = v;
+      a.scan.how = 'typed';
+      saveSession();
+      renderAudit();
+      showCounted(a.scan);
+    }
+  }
+
+  function closeTyping() {
+    var a = state.audit;
+    if (a.step === 'edit') { showCounted(a.scan); return; }
+    a.typing = false;
+    renderAuditCard();
+    scheduleMrp(0);
+  }
+
+  function openTyping(value) {
+    el.auditOtherInput.value = value == null ? '' : String(value);
+    renderAuditCard();
+    el.auditOtherInput.focus();
+    el.auditOtherInput.select();
+  }
+
+  function editCounted() {
+    var a = state.audit;
+    window.clearTimeout(state.auditTimer);
+    window.clearTimeout(state.timer);
+    state.paused = true;           // no new barcode while the price is being corrected
+    state.audit = { step: 'edit', code: a.code, scan: a.scan };
+    openTyping(a.scan.mrp);
+  }
+
+  function undoCounted() {
+    var a = state.audit, i = state.session.scans.indexOf(a.scan);
+    if (i >= 0) state.session.scans.splice(i, 1);
+    saveSession();
+    renderAudit();
+    state.sessionCount = Math.max(0, state.sessionCount - 1);
+    el.sessionCount.textContent = String(state.sessionCount);
+    rescanBarcode();
   }
 
   /* ---------------- audit: rendering ---------------- */
 
-  function addText(parent, s, strong) {
-    var n = document.createElement(strong ? 'strong' : 'span');
-    n.textContent = s;
-    parent.appendChild(n);
+  function addPill(label, onClick) {
+    var b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'pill';
+    b.textContent = label;
+    b.addEventListener('click', onClick);
+    el.auditActions.appendChild(b);
   }
 
   function renderAuditCard() {
     var a = state.audit;
-    if (!a.item || a.step === 'barcode') { el.audit.hidden = true; return; }
-    var ref = a.item.ref;
-    el.audit.hidden = false;
-    el.audit.classList.toggle('blocking', a.step === 'ask');
-    var tone = a.step === 'ask' ? ' warn'
-      : a.step === 'done' ? (a.result.refState === 'match' ? ' ok' : ' warn') : '';
-    el.auditCard.className = 'audit-card' + tone;
-    el.auditStep.textContent = { mrp: 'Now show the MRP', ask: 'Check the MRP', done: 'Recorded' }[a.step];
+    el.audit.hidden = a.step === 'barcode';
+    updateArmed();
+    if (a.step === 'barcode') return;
+    var typing = a.step === 'edit' || !!a.typing;
+    var d = a.decision, stuck = !!d && (d.status === 'unsure' || d.status === 'unreadable');
+    el.auditCard.className = 'audit-card' + (a.step === 'done' ? ' ok' : stuck ? ' warn' : '');
+    el.auditStep.textContent = a.step === 'done' ? 'Counted'
+      : a.step === 'edit' ? 'Edit the price'
+      : typing ? 'Type the price' : 'Barcode read — now the price';
+    el.auditCode.textContent = a.code;
+    el.auditOther.hidden = !typing;
+
     el.auditCancel.hidden = a.step === 'done';
-    el.auditProduct.textContent = ref && ref.name ? ref.name : '';
-    el.auditCode.textContent = a.item.code + ' · ' + a.item.format;
-    if (ref) {
-      el.auditAllowed.textContent = 'Expected ' + ref.mrps.map(Mrp.format).join(' · ');
-      el.auditAllowed.className = 'audit-allowed';
-    } else {
-      el.auditAllowed.textContent = state.reference
-        ? 'Barcode ' + a.item.code + ' is not in the reference list.'
-        : 'No reference list — only the label itself can confirm the MRP.';
-      el.auditAllowed.className = 'audit-allowed warn';
-    }
-    el.auditActions.hidden = a.step !== 'mrp';
-    el.auditShot.hidden = a.step !== 'ask' || !a.shot;
-    if (!el.auditShot.hidden) el.auditShot.src = a.shot;
-    el.auditChoices.hidden = a.step !== 'ask';
-    el.auditOther.hidden = true;
-    if (a.step === 'ask') renderChoices(a);
-    renderAuditStatus();
-  }
+    el.auditCancel.textContent = typing ? 'Back' : 'Rescan barcode';
 
-  function renderAuditStatus() {
-    var a = state.audit, s = el.auditStatus;
-    if (!a.item) return;
+    while (el.auditActions.firstChild) el.auditActions.removeChild(el.auditActions.firstChild);
+    if (a.step === 'done') {
+      addPill('Edit price', editCounted);
+      addPill('Undo', undoCounted);
+    } else if (!typing) {
+      if (stuck && d.value != null) addPill('Use ' + Mrp.format(d.value), function () { countUnit(a.code, d.value, 'accepted'); });
+      addPill('Type price', function () { a.typing = true; openTyping(d ? d.value : null); });
+    }
+
+    var s = el.auditStatus;
     while (s.firstChild) s.removeChild(s.firstChild);
-    if (a.step === 'mrp') {
-      var o = state.ocr, last = a.frames[a.frames.length - 1];
-      s.textContent = o.error ? 'The MRP reader is unavailable — tap Choose MRP.'
-        : !o.ready ? 'Loading the MRP reader…'
-        : a.photo ? 'Reading the photo…'
-        : !a.frames.length ? 'Hold the MRP label inside the frame.'
-        : last && last.value != null ? 'Read ' + Mrp.format(last.value) + ' — confirming…'
-        : 'Looking for the MRP… (' + a.frames.length + ' of ' + Mrp.MAX_FRAMES + ')';
-    } else if (a.step === 'ask') {
-      var d = a.ask;
-      if (d.reason === 'mismatch') {
-        addText(s, 'The label reads ');
+    if (a.step === 'done') {
+      var qty = 0, key = productKey(a.scan.code, a.scan.mrp);
+      state.session.scans.forEach(function (x) { if (productKey(x.code, x.mrp) === key) qty += 1; });
+      addText(s, Mrp.format(a.scan.mrp), true);
+      addText(s, ' — ' + (EVIDENCE[a.scan.how] || 'as read') + ' · now ×' + qty);
+    } else if (a.step === 'mrp' && !typing) {
+      var o = state.ocr;
+      if (o.error) addText(s, 'The price reader is unavailable. Type the price.');
+      else if (!o.ready) addText(s, 'Loading the price reader…');
+      else if (d && d.status === 'unreadable') addText(s, 'Price not recognised. Hold the MRP inside the frame to rescan it, or type it.');
+      else if (d && d.status === 'unsure') {
+        addText(s, 'Read ');
         addText(s, Mrp.format(d.value), true);
-        addText(s, ', which is not in the reference list. Check the label, then tap what it shows.');
-      } else if (d.reason === 'unconfirmed' && d.value != null) {
-        addText(s, 'Best read ');
-        addText(s, Mrp.format(d.value), true);
-        addText(s, ', but it could not be confirmed. Check the label, then tap what it shows.');
-      } else {
-        addText(s, 'The MRP could not be read. Check the label, then tap what it shows.');
-      }
-    } else if (a.step === 'done') {
-      var r = a.result;
-      addText(s, Mrp.format(r.value), true);
-      addText(s, r.how === 'label' ? ' — ' + (EVIDENCE[r.evidence] || 'checked on the label') + '.' : ' — confirmed by you.');
-      if (r.refState === 'mrp-mismatch') addText(s, ' Flagged: not in the reference list.');
-      else if (r.refState === 'barcode-unknown') addText(s, ' Flagged: barcode not in the reference list.');
+        addText(s, ' but could not confirm it. Rescan, use it, or type it.');
+      } else if (d && d.value != null) addText(s, 'Read ' + Mrp.format(d.value) + ' — checking…');
+      else addText(s, 'Hold the MRP inside the frame.');
     }
   }
 
-  function renderChoices(a) {
-    var box = el.auditChoices, d = a.ask, allowed = allowedFor(a.item) || [];
-    while (box.firstChild) box.removeChild(box.firstChild);
-    function add(label, sub, cls, onClick) {
-      var b = document.createElement('button');
-      b.type = 'button';
-      b.className = 'btn' + (cls ? ' ' + cls : '');
-      b.textContent = label;
-      if (sub) { var sm = document.createElement('small'); sm.textContent = sub; b.appendChild(sm); }
-      b.addEventListener('click', onClick);
-      box.appendChild(b);
-    }
-    var guess = d.value;
-    if (guess != null && !Mrp.inList(allowed, guess)) {
-      add(Mrp.format(guess), allowed.length ? 'label · not in reference' : 'as read', 'flag', function () { record(a, guess, 'person'); });
-    }
-    allowed.forEach(function (v) {
-      add(Mrp.format(v), 'in reference', guess != null && Math.abs(v - guess) < 0.005 ? 'suggested' : '',
-        function () { record(a, v, 'person'); });
-    });
-    add('Other…', 'type it', 'ghost', function () {
-      el.auditOther.hidden = false;
-      el.auditOtherInput.value = '';
-      el.auditOtherInput.focus();
-    });
-    add('Read again', 'camera', 'ghost', function () {
-      a.step = 'mrp';
-      a.frames = [];
-      a.shot = '';
-      a.photo = false;
-      renderAuditCard();
-      scheduleMrp(0);
-    });
+  function addText(parent, text, strong) {
+    var n = document.createElement(strong ? 'strong' : 'span');
+    n.textContent = text;
+    parent.appendChild(n);
   }
-
-  function saveOther(ev) {
-    ev.preventDefault();
-    var a = state.audit;
-    var v = Reference.parseMrps(el.auditOtherInput.value)[0];
-    if (a.step !== 'ask' || v == null) { el.auditOtherInput.focus(); return; }
-    record(a, v, 'person');
-  }
-
-  /* ---------------- audit: results list + export ---------------- */
-
-  function loadAudit() {
-    try {
-      var raw = window.localStorage.getItem(AUDIT_KEY);
-      var parsed = raw ? JSON.parse(raw) : [];
-      if (Array.isArray(parsed)) state.auditLines = parsed.filter(function (l) { return l && l.key && l.qty > 0; });
-    } catch (e) { state.auditLines = []; }
-  }
-
-  function saveAudit() {
-    try { window.localStorage.setItem(AUDIT_KEY, JSON.stringify(state.auditLines)); } catch (e) {}
-  }
-
-  var REF_STATE = {
-    'match': 'matches reference',
-    'mrp-mismatch': 'MRP NOT IN REFERENCE',
-    'barcode-unknown': 'barcode not in reference',
-    'no-reference': 'no reference list'
-  };
 
   function renderAudit() {
-    var list = el.auditList, units = 0;
+    var s = state.session, active = auditActive();
+    var products = auditProducts(), units = s ? s.scans.length : 0;
+    var time = function (ms) {
+      try { return new Date(ms).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }); } catch (e) { return ''; }
+    };
+    var tally = products.length + (products.length === 1 ? ' product · ' : ' products · ') + units + (units === 1 ? ' unit' : ' units');
+    el.auditTitle.textContent = active ? 'Audit in progress' : s ? 'Audit ended' : 'No audit in progress';
+    el.auditSub.textContent = active ? 'Started ' + time(s.startedAt) + ' · ' + tally
+      : s ? 'Ended ' + time(s.endedAt) + ' · ' + tally
+      : 'Start a new audit, then scan each product’s barcode and price.';
+    el.auditEndBtn.hidden = !active;
+    el.auditDownloadBtn.hidden = !s || active;
+    el.auditUnits.textContent = String(units);
+    el.auditEmpty.hidden = products.length > 0;
+
+    var list = el.auditList;
     while (list.firstChild) list.removeChild(list.firstChild);
-    state.auditLines.forEach(function (line) {
-      units += line.qty;
+    products.forEach(function (p) {
       var li = document.createElement('li');
       var main = document.createElement('div');
       main.className = 'h-main';
       var val = document.createElement('div');
       val.className = 'h-val';
-      val.textContent = line.name || line.code;
-      var how = [];
-      if (line.byLabel) how.push(line.byLabel + ' checked on label');
-      if (line.byPerson) how.push(line.byPerson + ' confirmed by you');
-      if (line.refState !== 'match') how.push(REF_STATE[line.refState]);
+      val.textContent = p.code;
       var meta = document.createElement('div');
       meta.className = 'h-meta';
-      meta.textContent = (line.name ? line.code + ' · ' : '') + how.join(' · ');
+      meta.textContent = 'Last counted ' + timeLabel(p.last);
       main.appendChild(val);
       main.appendChild(meta);
-
-      var chip = document.createElement('span');
-      chip.className = 'mrp-chip' + (line.refState === 'match' ? '' : ' warn');
-      chip.textContent = Mrp.format(line.mrp);
-      var qty = document.createElement('span');
-      qty.className = 'qty';
-      qty.textContent = '×' + line.qty;
-      var minus = document.createElement('button');
-      minus.type = 'button';
-      minus.className = 'minus';
-      minus.textContent = '−';
-      minus.setAttribute('aria-label', 'Remove one unit of ' + (line.name || line.code));
-      minus.addEventListener('click', function () {
-        line.qty -= 1;
-        if (line.byPerson) line.byPerson -= 1; else if (line.byLabel) line.byLabel -= 1;
-        if (line.qty <= 0) state.auditLines.splice(state.auditLines.indexOf(line), 1);
-        saveAudit();
-        renderAudit();
-      });
-
       li.appendChild(main);
-      li.appendChild(chip);
-      li.appendChild(qty);
-      li.appendChild(minus);
+
+      var editing = state.rowEdit && state.rowEdit.key === p.key;
+      if (editing) {
+        li.appendChild(rowEditor(p));
+      } else {
+        var chip = document.createElement(active ? 'button' : 'span');
+        chip.className = 'mrp-chip';
+        chip.textContent = Mrp.format(p.mrp);
+        if (active) {
+          chip.type = 'button';
+          chip.setAttribute('aria-label', 'Edit the price of ' + p.code);
+          chip.addEventListener('click', function () {
+            state.rowEdit = { key: p.key, value: String(p.mrp) };
+            renderAudit();
+          });
+        }
+        li.appendChild(chip);
+        if (active) li.appendChild(stepButton('−', 'Remove one unit of ' + p.code, function () { removeUnit(p); }));
+        var qty = document.createElement('span');
+        qty.className = 'qty';
+        qty.textContent = '×' + p.qty;
+        li.appendChild(qty);
+        if (active) li.appendChild(stepButton('+', 'Add one unit of ' + p.code, function () { addUnit(p); }));
+      }
       list.appendChild(li);
     });
-    el.auditUnits.textContent = String(units);
-    el.auditEmpty.hidden = state.auditLines.length > 0;
-    el.auditExportBtn.hidden = state.auditLines.length === 0;
-    el.auditClearBtn.hidden = state.auditLines.length === 0;
+    if (state.rowEdit) {
+      var input = list.querySelector('input');
+      if (input) { input.focus(); input.setSelectionRange(input.value.length, input.value.length); }
+      else state.rowEdit = null;
+    }
+    renderStartLabel();
   }
 
-  function stamp(ms, sep) {
-    var d = new Date(ms), p = function (n) { return (n < 10 ? '0' : '') + n; };
-    return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate()) + (sep || ' ') +
-      p(d.getHours()) + (sep ? '' : ':') + p(d.getMinutes()) + (sep ? '' : ':' + p(d.getSeconds()));
+  function stepButton(text, label, onClick) {
+    var b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'minus';
+    b.textContent = text;
+    b.setAttribute('aria-label', label);
+    b.addEventListener('click', onClick);
+    return b;
   }
 
-  function exportAudit() {
-    var rows = [['barcode', 'product', 'mrp', 'qty', 'mrp_check', 'checked_on_label', 'confirmed_by_person', 'first_scan', 'last_scan']];
-    state.auditLines.slice().reverse().forEach(function (l) {
-      rows.push([l.code, l.name || '', l.mrp.toFixed(2), l.qty, REF_STATE[l.refState] || '',
-                 l.byLabel, l.byPerson, stamp(l.first), stamp(l.last)]);
+  function rowEditor(p) {
+    var form = document.createElement('form');
+    form.className = 'row-edit';
+    var input = document.createElement('input');
+    input.type = 'text';
+    input.inputMode = 'decimal';
+    input.autocomplete = 'off';
+    input.value = state.rowEdit.value;
+    input.setAttribute('aria-label', 'New price for ' + p.code);
+    input.addEventListener('input', function () { state.rowEdit.value = input.value; });
+    var save = document.createElement('button');
+    save.type = 'submit';
+    save.className = 'pill';
+    save.textContent = 'Save';
+    var cancel = document.createElement('button');
+    cancel.type = 'button';
+    cancel.className = 'pill';
+    cancel.textContent = 'Cancel';
+    cancel.addEventListener('click', function () { state.rowEdit = null; renderAudit(); });
+    form.addEventListener('submit', function (ev) {
+      ev.preventDefault();
+      var v = parsePrice(input.value);
+      if (v == null) { input.focus(); input.select(); return; }
+      state.session.scans.forEach(function (x) {
+        if (productKey(x.code, x.mrp) === p.key) { x.mrp = v; x.how = 'typed'; }
+      });
+      state.rowEdit = null;
+      saveSession();
+      renderAudit();
     });
-    var csv = rows.map(function (r) {
-      return r.map(function (c) { return '"' + String(c).replace(/"/g, '""') + '"'; }).join(',');
-    }).join('\r\n');
-    var blob = new Blob(['﻿' + csv], { type: 'text/csv;charset=utf-8' });
-    var link = document.createElement('a');
-    link.href = URL.createObjectURL(blob);
-    link.download = 'audit-' + stamp(Date.now(), '-') + '.csv';
-    document.body.appendChild(link);
-    link.click();
-    window.setTimeout(function () { URL.revokeObjectURL(link.href); link.remove(); }, 1000);
+    form.appendChild(input);
+    form.appendChild(save);
+    form.appendChild(cancel);
+    return form;
   }
 
-  function clearAudit() {
-    var units = state.auditLines.reduce(function (s, l) { return s + l.qty; }, 0);
-    if (!window.confirm('Clear all ' + units + ' audited units? Export first if you need them.')) return;
-    state.auditLines = [];
-    saveAudit();
+  // From the list, so it must not disturb a product being scanned right now.
+  function addUnit(p) {
+    state.session.scans.push({ code: p.code, mrp: p.mrp, at: Date.now(), how: 'typed' });
+    saveSession();
     renderAudit();
   }
 
-  /* ---------------- audit: reference list ---------------- */
-
-  function renderRef() {
-    var r = state.reference;
-    if (r) {
-      el.refTitle.textContent = r.items.size.toLocaleString() + ' products in the reference list';
-      var when = '';
-      try { when = new Date(r.importedAt).toLocaleString([], { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }); } catch (e) {}
-      el.refSub.textContent = (r.name || 'Imported list') + (when ? ' · imported ' + when : '');
-      el.refImportBtn.textContent = 'Replace';
-      el.refRemoveBtn.hidden = false;
-    } else {
-      el.refTitle.textContent = 'No reference list';
-      el.refSub.textContent = 'Import a CSV with barcode and MRP columns from your stock system.';
-      el.refImportBtn.textContent = 'Import CSV';
-      el.refRemoveBtn.hidden = true;
+  function removeUnit(p) {
+    var scans = state.session.scans;
+    for (var i = scans.length - 1; i >= 0; i--) {
+      if (productKey(scans[i].code, scans[i].mrp) === p.key) { scans.splice(i, 1); break; }
     }
+    saveSession();
+    renderAudit();
   }
 
-  function importReference(file) {
-    if (!file) return;
-    var reader = new FileReader();
-    reader.onload = function () {
-      var parsed;
-      try { parsed = Reference.fromCsv(String(reader.result)); }
-      catch (e) { setNotice('Could not import ' + file.name + ': ' + e.message, 'warn'); return; }
-      var ref = { name: file.name, importedAt: Date.now(), items: parsed.items };
-      state.reference = ref;
-      renderRef();
-      var msg = 'Imported ' + ref.items.size.toLocaleString() + ' products from ' + file.name + '.';
-      if (parsed.warnings.length) msg += ' ' + parsed.warnings.join(' ');
-      setNotice(msg, parsed.warnings.length ? 'warn' : 'info');
-      Reference.save(ref).catch(function () {
-        setNotice('The reference list is loaded, but this browser would not store it — import it again after a reload.', 'warn');
-      });
-    };
-    reader.onerror = function () { setNotice('Could not read ' + file.name + '.', 'warn'); };
-    reader.readAsText(file);
-  }
-
-  function removeReference() {
-    if (!window.confirm('Remove the reference list from this device?')) return;
-    state.reference = null;
-    renderRef();
-    Reference.clear().catch(function () {});
+  function renderStartLabel() {
+    if (state.running || state.starting) return;
+    el.startLabel.textContent = state.mode !== 'audit' ? 'Start scanning'
+      : auditActive() ? 'Resume scanning' : 'Start new audit';
   }
 
   /* ---------------- mode ---------------- */
@@ -1230,9 +1272,11 @@
     el.scanSection.hidden = state.mode === 'audit';
     el.auditSection.hidden = state.mode !== 'audit';
     if (prev === 'audit' && state.mode !== 'audit') auditReset();
+    if (state.mode === 'audit' && state.running && !auditActive()) stop();
+    renderStartLabel();
     // Switching out of confirm mode must not leave the loop parked.
     if (state.mode !== 'confirm' && state.pending) { state.pending = null; resumeAfterConfirm(); }
-    // Start the model download while barcodes are being scanned, not when the first MRP is due.
+    // Start the model download before the first price is due.
     if (state.mode === 'audit') ensureOcr();
   }
 
@@ -1267,6 +1311,8 @@
       state.sessionCount = 0;
       state.lastHitAt = Date.now();
       state.backupN = 0;
+      state.armedAt = Date.now();
+      window.setTimeout(updateArmed, NO_BARCODE_HINT_MS + 50);
       if (state.mode === 'audit') ensureOcr();
       el.sessionCount.textContent = '0';
       el.sessionChip.hidden = false;
@@ -1279,17 +1325,17 @@
       state.running = false;
       closeStream();
       el.stage.classList.remove('live');
-      el.startLabel.textContent = 'Start scanning';
       showCameraError(err);
     }).then(function () {
       state.starting = false;
       el.startBtn.disabled = false;
+      renderStartLabel();
     });
   }
 
   function stop() {
     state.running = false;
-    if (state.audit.item) auditReset();
+    if (state.audit.step !== 'barcode') auditReset();
     state.paused = false;
     state.pending = null;
     window.clearTimeout(state.timer);
@@ -1301,7 +1347,7 @@
     hideConfirm();
     el.stage.classList.remove('live');
     el.startBtn.classList.remove('stopping');
-    el.startLabel.textContent = 'Start scanning';
+    renderStartLabel();
     el.torchBtn.disabled = true;
     el.torchBtn.classList.remove('active');
     el.flipBtn.disabled = true;
@@ -1312,7 +1358,9 @@
   /* ---------------- wiring ---------------- */
 
   el.startBtn.addEventListener('click', function () {
-    if (state.running) stop(); else start();
+    if (state.running) stop();
+    else if (state.mode === 'audit' && !auditActive()) startNewAudit();
+    else start();
   });
   el.torchBtn.addEventListener('click', toggleTorch);
   el.flipBtn.addEventListener('click', switchCamera);
@@ -1333,21 +1381,10 @@
     refocusAt(ev.clientX, ev.clientY);
   });
 
-  el.auditCancel.addEventListener('click', auditReset);
-  el.auditPickBtn.addEventListener('click', function () {
-    var a = state.audit;
-    if (a.step !== 'mrp') return;
-    var guess = Mrp.bestGuess(a.frames);
-    askPerson(a, { reason: guess == null ? 'unreadable' : 'unconfirmed', value: guess });
-  });
-  el.auditPhotoBtn.addEventListener('click', function () { el.auditPhoto.value = ''; el.auditPhoto.click(); });
-  el.auditPhoto.addEventListener('change', function () { readPhoto(el.auditPhoto.files && el.auditPhoto.files[0]); });
-  el.auditOther.addEventListener('submit', saveOther);
-  el.refImportBtn.addEventListener('click', function () { el.refFile.value = ''; el.refFile.click(); });
-  el.refFile.addEventListener('change', function () { importReference(el.refFile.files && el.refFile.files[0]); });
-  el.refRemoveBtn.addEventListener('click', removeReference);
-  el.auditExportBtn.addEventListener('click', exportAudit);
-  el.auditClearBtn.addEventListener('click', clearAudit);
+  el.auditCancel.addEventListener('click', auditCancel);
+  el.auditOther.addEventListener('submit', submitPrice);
+  el.auditEndBtn.addEventListener('click', endAudit);
+  el.auditDownloadBtn.addEventListener('click', downloadExcel);
 
   // Tapping a non-blocking confirmation dismisses it early.
   el.confirm.addEventListener('click', function (ev) {
@@ -1358,7 +1395,7 @@
 
   document.addEventListener('keydown', function (ev) {
     if (state.mode === 'audit') {
-      if (ev.key === 'Escape' && state.audit.item && state.audit.step !== 'done') { ev.preventDefault(); auditReset(); }
+      if (ev.key === 'Escape' && (state.audit.step === 'mrp' || state.audit.step === 'edit')) { ev.preventDefault(); auditCancel(); }
       return;
     }
     if (!state.paused) return;
@@ -1369,7 +1406,7 @@
   document.addEventListener('visibilitychange', function () {
     if (document.hidden && state.running) {
       stop();
-      setNotice('Camera released while the page was in the background. Tap Start scanning to resume.', 'info');
+      setNotice('Camera released while the page was in the background. Tap the button below to resume.', 'info');
     }
   });
 
@@ -1378,12 +1415,8 @@
   try { setMode(window.localStorage.getItem(MODE_KEY) || 'auto'); } catch (e) { setMode('auto'); }
   loadHistory();
   renderHistory();
-  loadAudit();
+  loadSession();
   renderAudit();
-  renderRef();
-  Reference.load().then(function (ref) {
-    if (ref) { state.reference = ref; renderRef(); }
-  }).catch(function () {});
 
   if (!secureEnough()) {
     setNotice('This page is not on a secure connection, so the browser will not grant camera access. Open it over https://.', 'warn');

@@ -1,11 +1,13 @@
-/* MRP reading rules: pull the MRP off OCR'd label lines and decide whether it can be
- * trusted. Nothing here guesses — a value is only auto-accepted on independent evidence,
- * otherwise the person decides. Shared by the app and the Node tests. */
+/* MRP reading rules: pull the MRP off OCR'd label lines and decide when a reading can be
+ * counted. There is no reference list to check against, so a reading is only accepted
+ * on evidence from the label itself or from this audit; otherwise the person is told.
+ * Shared by the app and the Node tests. */
 (function (root) {
   'use strict';
 
-  var MAX_FRAMES = 5;        // OCR attempts before handing over to the person
-  var MIN_DIGIT_CONF = 0.9;  // every digit of a repeat-read must be at least this sure
+  var MAX_FRAMES = 5;        // readings before telling the person it is not coming
+  var MIN_CONF = 0.6;        // every digit of an accepted reading must be at least this sure
+  var RUPEE_MAX_CONF = 0.75; // a leading digit this unsure, with no ₹ read, is the ₹ sign
 
   // "MRP", "M.R.P." and the misreads OCR makes of small print ("MEP", "MRF"), or a
   // combined "MRP/USP" label read too poorly to spell. Not a bare "USP": the first
@@ -35,19 +37,21 @@
   }
 
   // First price-like token in `text` from `offset`, skipping dates ("09/2027") and unit
-  // prices ("2.33/Tab", "per ml") which sit next to the MRP on many labels.
+  // prices ("2.33/Tab", "4.40 per ml") which sit next to the MRP on many labels.
   function firstPrice(text, offset, conf) {
     var re = /\S+/g, m;
     re.lastIndex = offset;
     while ((m = re.exec(text))) {
       var tok = m[0];
       if (DATE.test(tok) || /\/\s*(tab|ml|g|gm|kg|l)\b/i.test(tok) || /per/i.test(tok)) continue;
+      if (/^\s*per/i.test(text.slice(re.lastIndex))) continue;
       var lead = tok.search(/\d/);
       if (lead < 0) continue;
       var num = tok.slice(lead).match(PRICE);
       if (!num) continue;
-      var start = m.index + lead;
-      return priceAt(num[0], start, conf);
+      var p = priceAt(num[0], m.index + lead, conf);
+      p.lead = text.slice(offset, m.index + lead);
+      return p;
     }
     return null;
   }
@@ -75,9 +79,10 @@
       if (!m) continue;
       var after = m.index + m[0].length;
       var dash = text.indexOf('/-', after);
-      var limited = dash > 0 ? text.slice(0, dash) : text;
-      var hit = firstPrice(limited, after, lines[i].conf);
-      if (!hit && lines[i + 1]) hit = firstPrice(fixDigits(lines[i + 1].text), 0, lines[i + 1].conf);
+      var hit = firstPrice(dash > 0 ? text.slice(0, dash) : text, after, lines[i].conf);
+      if (!hit && lines[i + 1] && !/USP/i.test(lines[i + 1].text)) {
+        hit = firstPrice(fixDigits(lines[i + 1].text), 0, lines[i + 1].conf);
+      }
       if (hit) { hit.line = lines[i].text; return hit; }
     }
     for (i = 0; i < lines.length; i++) {
@@ -115,24 +120,32 @@
     return false;
   }
 
-  // One OCR frame → what it says about the MRP. The ₹ sign is often read as a leading
-  // digit ("₹3,300" → "53,300"); the shorter number is only taken when something
-  // independent (the reference list or the USP line) names it.
-  function assess(lines, allowed) {
+  // One OCR frame → what it says about the MRP. `seen` holds the prices already counted
+  // for this barcode in this audit. The ₹ sign is often read as a leading digit
+  // ("₹3,300" → "53,300"); the shorter number is taken when the USP line or `seen` names
+  // it, or when no ₹ was read at all and that first digit is one the reader doubts.
+  function assess(lines, seen) {
     var read = readMrp(lines);
     var check = readUspCheck(lines);
-    var r = { found: !!read, read: read ? read.value : null, line: read ? read.line : '', check: check,
-              value: null, conf: 0, rupeeFix: false, usp: false };
-    if (!read) return r;
+    var r = { found: false, read: null, line: '', check: check,
+              value: null, conf: 0, rupeeFix: false, usp: false, conflict: false };
+    if (!read || !(read.value > 0)) return r;
+    r.found = true;
+    r.read = read.value;
+    r.line = read.line;
     var value = read.value, skip = 0;
     var alt = read.str.length > 1 && /\d/.test(read.str[1]) ? toNumber(read.str.slice(1)) : null;
-    if (!inList(allowed, value) && !uspAgrees(check, value) && alt != null &&
-        (inList(allowed, alt) || uspAgrees(check, alt))) {
-      value = alt; r.rupeeFix = true; skip = 1;   // the first character was the ₹ sign
+    var named = function (v) { return inList(seen, v) || uspAgrees(check, v); };
+    if (!named(value) && alt > 0) {
+      var noRupee = read.lead != null && /^[\s:;.,\-]*$/.test(read.lead);
+      if (named(alt) || (noRupee && read.confs && read.confs[0] < RUPEE_MAX_CONF)) {
+        value = alt; r.rupeeFix = true; skip = 1;
+      }
     }
     r.value = value;
     r.conf = digitConf(read, skip);
     r.usp = uspAgrees(check, value);
+    r.conflict = !!check && !r.usp;   // the label's own USP line says otherwise
     return r;
   }
 
@@ -153,59 +166,31 @@
     return { avoid: [], flip: false };
   }
 
-  // Two allowed MRPs one digit apart ("3,300" and "3,380") are too easy to confuse —
-  // for those, a repeated read is not enough and only the USP line settles it.
-  function hasNearSibling(allowed, v) {
-    var a = String(Math.round(v * 100));
-    return (allowed || []).some(function (o) {
-      var b = String(Math.round(o * 100));
-      if (b === a || b.length !== a.length) return false;
-      var diff = 0;
-      for (var i = 0; i < a.length; i++) if (a[i] !== b[i]) diff++;
-      return diff === 1;
-    });
-  }
-
-  /* Combine the frames read so far.
-   *   allowed: the reference MRPs for this barcode, or null when the barcode is unknown.
+  /* Combine the frames read so far for one product.
    * Returns { status, value, evidence }:
-   *   'verified'  — auto-accept: matches the reference AND has independent support
-   *                 (evidence 'ref+usp', 'ref+repeat', or 'usp' when the barcode is unknown)
-   *   'pending'   — keep reading
-   *   'ask'       — hand over to the person (with the best guess, if any) */
-  function decide(frames, allowed) {
-    var known = !!(allowed && allowed.length);
-    var last = frames[frames.length - 1];
-
+   *   'accepted'   — count it. evidence 'usp' (the label's USP line agrees), 'seen' (the
+   *                  same price is already counted for this barcode) or 'repeat' (two
+   *                  frames read the same value)
+   *   'pending'    — keep reading; value is the latest reading, if any
+   *   'unsure'     — a price was read but never confirmed; value is the best guess
+   *   'unreadable' — no price found in any frame */
+  function decide(frames, seen) {
     for (var i = frames.length - 1; i >= 0; i--) {
       var f = frames[i];
       if (f.value == null) continue;
-      var match = inList(allowed, f.value);
-      // Strongest: the label's own USP line agrees, and the value is in the reference.
-      if (f.usp && (match || !known)) {
-        return { status: 'verified', value: f.value, evidence: known ? 'ref+usp' : 'usp', inReference: match };
-      }
-      // Two separate frames reading the same allowed value, every digit confidently.
-      if (match && f.conf >= MIN_DIGIT_CONF && !hasNearSibling(allowed, f.value)) {
-        for (var j = 0; j < i; j++) {
-          var g = frames[j];
-          if (g.value === f.value && g.conf >= MIN_DIGIT_CONF) {
-            return { status: 'verified', value: f.value, evidence: 'ref+repeat', inReference: true };
-          }
+      if (f.usp) return { status: 'accepted', value: f.value, evidence: 'usp' };
+      if (f.conflict || f.conf < MIN_CONF) continue;
+      if (inList(seen, f.value)) return { status: 'accepted', value: f.value, evidence: 'seen' };
+      for (var j = 0; j < i; j++) {
+        var g = frames[j];
+        if (g.value === f.value && !g.conflict && g.conf >= MIN_CONF) {
+          return { status: 'accepted', value: f.value, evidence: 'repeat' };
         }
       }
     }
-
-    // A label value that is NOT in the reference and is backed by its USP line is a
-    // finding, not an OCR slip — but the person still confirms it before it is recorded.
-    if (known && last && last.value != null && last.usp && !inList(allowed, last.value)) {
-      return { status: 'ask', value: last.value, reason: 'mismatch', inReference: false };
-    }
-    if (frames.length >= MAX_FRAMES) {
-      var guess = bestGuess(frames);
-      return { status: 'ask', value: guess, reason: guess == null ? 'unreadable' : 'unconfirmed', inReference: inList(allowed, guess) };
-    }
-    return { status: 'pending' };
+    var guess = bestGuess(frames);
+    if (frames.length < MAX_FRAMES) return { status: 'pending', value: guess };
+    return { status: guess == null ? 'unreadable' : 'unsure', value: guess };
   }
 
   function bestGuess(frames) {
@@ -213,8 +198,8 @@
     frames.forEach(function (f) {
       if (f.value == null) return;
       var k = String(f.value);
-      counts[k] = (counts[k] || 0) + 1 + (f.usp ? 2 : 0);
-      if (counts[k] > bestN) { bestN = counts[k]; best = f.value; }
+      counts[k] = (counts[k] || 0) + 1;
+      if (counts[k] >= bestN) { bestN = counts[k]; best = f.value; }
     });
     return best;
   }
@@ -230,8 +215,7 @@
 
   var api = {
     readMrp: readMrp, readUspCheck: readUspCheck, assess: assess, decide: decide,
-    nextAttempt: nextAttempt, bestGuess: bestGuess, fixDigits: fixDigits, inList: inList, format: format,
-    MAX_FRAMES: MAX_FRAMES
+    nextAttempt: nextAttempt, format: format, MAX_FRAMES: MAX_FRAMES
   };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   else root.Mrp = api;

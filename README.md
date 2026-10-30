@@ -2,8 +2,8 @@
 
 A single-page web app that uses your phone's camera to read barcodes and QR codes.
 It is built for working through a *pile* of codes: every read is confirmed on screen and
-the scanner immediately re-arms for the next one. **Audit** mode also reads the MRP off
-each product's label and checks it against your stock reference list. No install, no
+the scanner immediately re-arms for the next one. **Audit** mode counts stock by barcode +
+price, reading the MRP off each label, and exports the counts to Excel. No install, no
 backend, no uploads — the video never leaves the device.
 
 **Live:** https://aswinsreeram01.github.io/barcode-qr-scanner/
@@ -14,64 +14,63 @@ backend, no uploads — the video never leaves the device.
 | --- | --- |
 | **Rapid** (default) | Each read is beeped, buzzed and shown on a confirmation card for about a second while scanning continues uninterrupted. Hold codes up back to back. |
 | **Confirm each** | Scanning parks on each read and shows **Keep & next** / **Discard**. Tap (or press Enter / Esc) and it re-arms instantly. Use it when a mis-read would be expensive. |
-| **Audit** | For stock audits and receiving: scan the barcode, then show the MRP label. Each unit is recorded with its MRP and how that MRP was checked. See below. |
+| **Audit** | For stock audits and receiving: start an audit, scan every unit's barcode and price, end it, and download the counts as an Excel file. See below. |
 
 In every mode the same code will not be counted twice while it sits in front of the lens —
 a short suppression window has to elapse, or a different code has to be read.
 
 ## Audit mode: barcode + MRP
 
-1. **Import the reference list** — a CSV export from the stock system listing every
-   barcode and the MRPs valid for it. It is stored on the device (IndexedDB) and stays
-   until replaced or removed.
-2. **Scan the barcode.** The card shows the product and its expected MRPs.
-3. **Show the MRP label** inside the frame (turn the pack if the MRP is on another face).
-   The label is read on the device and the unit is recorded.
+A product is its **barcode + price**: the same barcode at two prices is two products.
+Every scan is one unit of a product, and the audit ends with a count for each.
 
-### When an MRP is accepted automatically
+1. **Start new audit.** The camera starts. An audit in progress survives a reload.
+2. **Scan each unit.** Barcode first, then the price:
+   - both in one view counts as **one scan**;
+   - otherwise it is **two scans**: the barcode is held on screen for as long as it takes
+     to bring the MRP into the frame.
+3. **End audit** downloads `audit-<date>-<time>.xlsx`, with `Barcode`, `MRP` and `Count`
+   columns. The list then locks; **Download Excel** fetches the file again until a new
+   audit starts.
 
-The app never saves a guessed MRP. A reading is accepted without a tap only when it
-**matches the reference list** *and* something independent backs it up:
+### Telling you what needs a rescan
 
-- **the label's own USP line** — Indian labels print a unit sale price and net quantity
-  (`USP ₹4.40 per ml` … `Net Vol 750ml`), and USP × quantity must equal the MRP; or
-- **two separate camera frames** read the same value with every digit at ≥ 90 %
-  confidence. Not used when two reference MRPs for the barcode differ by a single digit
-  (₹3,300 / ₹3,380) — then only the USP line can settle it.
-
-Everything else goes to the person, with the label photo, the best reading and the
-reference MRPs as one-tap buttons:
+Scanning never gets stuck, and nothing is counted without a price.
 
 | Situation | What happens |
 | --- | --- |
-| Label MRP is **not** in the reference list | Never auto-accepted. The card says what the label reads; the person taps the label value (recorded and flagged **MRP NOT IN REFERENCE**) or a reference value. |
-| Reading not confirmed after 5 frames | Best reading pre-highlighted; tap it, another MRP, or type it. |
-| Barcode not in the reference list | MRP can only be auto-accepted via the USP line; the line is flagged. |
-| Label hard to read live | **Photo** uses the phone's own camera app (sharper focus); **Choose MRP** skips straight to the buttons. |
+| No barcode read for 8 s | A hint says to hold it flat, zoom or use the flash. |
+| The same barcode is still in view | It is not counted again, and a hint says to take it out of view to count another. |
+| No price found | "Price not recognised". Reading continues, so bringing the MRP into the frame is the rescan. **Type price** enters it by hand. |
+| A price read but not confirmed | Shown with **Use ₹…** and **Type price**; reading continues meanwhile. |
+| Wrong barcode | **Rescan barcode** starts that product again. |
 
-Every audit line records `checked_on_label` and `confirmed_by_person` counts, so the
-export shows how each unit's MRP was established. **Export CSV** downloads
-`barcode, product, mrp, qty, mrp_check, checked_on_label, confirmed_by_person,
-first_scan, last_scan`; **−** on a line removes one unit.
+### When a price counts by itself
 
-### Reference CSV format
+A reading is counted without a tap when one of these backs it up:
 
-```csv
-barcode,product,mrp
-0691027644058,Shea Conditioner 750ml,3300
-0691027646175,Shea Hair Mask 500ml,3480 | 3280
-8904059147216,Ayurvedic Tablets 60s,140
-```
+- **the label's USP line**: Indian labels print a unit sale price and net quantity
+  (`USP ₹4.40 per ml` … `Net Vol 750ml`), and USP × quantity should equal the MRP;
+- **a price already counted** for this barcode in this audit, which also makes further
+  units of a product quicker; or
+- **two camera frames** reading the same value.
 
-- Columns are found by header name: `barcode` (or `ean` / `gtin` / `upc` / `code`), `mrp`
-  (or `price`), and optionally `product` / `name`. Comma, semicolon or tab separated.
-- Several MRPs for one barcode: separate them with `|`, `;` or `/` in one cell, or repeat
-  the barcode on several rows. `3,300` is read as one price.
-- Leading zeros do not matter: `0691027644058`, `691027644058` and `00691027644058` match.
-- If Excel has turned barcodes into `6.91E+11`, the import says so — format the column
-  as Text and export again.
+A reading the label's USP line contradicts needs the USP check or a person. The ₹ sign is
+often read as a leading digit (`₹3,300` → `53,300`). The digit is dropped when the USP
+line or an already-counted price names the shorter number, or when no ₹ was read and the
+reader doubts that digit.
 
-### The MRP reader
+There is no reference list yet, so a reading that passes these checks can still be wrong.
+Checking counts and prices against the stock database is planned as phase 2.
+
+### Correcting mistakes
+
+- **Edit price** or **Undo** on the "Counted" card, for about 3 seconds after each unit.
+- Tap a price in the list to change it for that whole row; rows with the same barcode and
+  price merge.
+- **−** and **+** on a row adjust its count by hand.
+
+### The price reader
 
 PaddleOCR (PP-OCRv4) text detection and recognition models running on ONNX Runtime Web
 in a Web Worker. The label's angle is measured from the text lines themselves, so tilted
@@ -142,8 +141,8 @@ MRP reader to load.
 
 `test/mrp-bench.js` runs the app's own `js/ocr-core.js` and `js/mrp.js` on sample label
 photos in Node, the way the live flow does (several frames per product, each framed a
-little differently), against three reference situations: the label's MRP is listed, it
-is not listed (must never auto-accept), and the barcode is unknown.
+little differently). Each photo is scored as the first unit of its barcode, as a repeat
+unit, and with a different price already counted, which must not attract the reading.
 
 ```bash
 cd test && npm install && npm run bench
@@ -157,9 +156,9 @@ Photos go in `samples/` (not committed), named `NN_description_MRP-<amount>.jpg`
 ```
 index.html              markup
 css/styles.css          styles
-js/app.js               camera, scan loop, decoding, confirmation flow, history, audit flow
-js/mrp.js               MRP parsing, USP cross-check and the accept-or-ask rules
-js/reference.js         reference CSV import, barcode normalising, on-device storage
+js/app.js               camera, scan loop, decoding, confirmation flow, history, audit
+js/mrp.js               MRP parsing, USP cross-check and the rules for counting a reading
+js/xlsx.js              writes the audit's Excel file
 js/ocr-core.js          text reader: angle estimate, straightening, PaddleOCR detect + recognise
 js/ocr-worker.js        runs the text reader in a Web Worker, caches the models
 vendor/zxing-wasm/      zxing-wasm 2.2.4 (zxing-cpp WebAssembly reader) — main decoder

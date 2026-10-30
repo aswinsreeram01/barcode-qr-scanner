@@ -550,9 +550,8 @@ html, body {
 .frame.label { width: 94%; aspect-ratio: 1.55; }
 .frame.label .scanline { display: none; }
 
-/* ---------- audit: MRP card on the camera view ---------- */
-/* While reading, a slim strip at the top keeps the label frame in view; when the
-   person has to decide, it becomes a centred card. */
+/* ---------- audit: strip on the camera view ---------- */
+/* A slim strip at the top, so the frame below it stays in view. */
 .audit {
   position: absolute;
   inset: 0;
@@ -563,83 +562,49 @@ html, body {
   z-index: 3;
   pointer-events: none;
 }
-.audit.blocking { background: rgba(5, 8, 12, .6); align-items: center; }
 .audit-card {
   pointer-events: auto;
   width: 100%;
   max-width: 440px;
-  max-height: 100%;
-  overflow-y: auto;
   background: rgba(19, 25, 34, .95);
   border: 1px solid var(--line);
   border-radius: var(--radius);
   box-shadow: 0 10px 30px rgba(0, 0, 0, .5);
-  padding: 8px 12px 9px;
+  padding: 8px 12px 10px;
   animation: confirmIn .16s ease-out;
 }
-.audit.blocking .audit-card { padding: 12px 14px; }
 .audit-card.ok { border-color: rgba(88, 245, 200, .6); }
 .audit-card.warn { border-color: rgba(255, 204, 102, .6); }
-.audit-top { display: flex; align-items: center; gap: 8px; min-height: 28px; }
+.audit-top { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-height: 26px; }
 .audit-step {
-  margin-right: auto;
   font-size: 11px;
   font-weight: 700;
   letter-spacing: .05em;
   text-transform: uppercase;
   color: var(--accent);
-  white-space: nowrap;
 }
 .audit-card.warn .audit-step { color: #ffcc66; }
-.audit-actions { display: flex; gap: 6px; }
+.audit-code { font: 500 13px/1.4 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; overflow-wrap: anywhere; }
+.audit-status { margin-top: 2px; font-size: 13px; color: var(--muted); }
+.audit-status:empty { display: none; }
+.audit-status strong { color: var(--text); font-size: 17px; font-variant-numeric: tabular-nums; }
+.audit-actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 7px; }
+.audit-actions:empty { display: none; }
 .pill {
   border: 1px solid var(--line);
   border-radius: 999px;
   background: var(--panel-2);
   color: var(--text);
   font: inherit;
-  font-size: 12.5px;
+  font-size: 13px;
   font-weight: 600;
-  padding: 5px 11px;
+  padding: 7px 13px;
   cursor: pointer;
   white-space: nowrap;
 }
-.audit-what {
-  display: flex;
-  align-items: baseline;
-  gap: 8px;
-  margin-top: 2px;
-  font-size: 13.5px;
-  min-width: 0;
-}
-.audit-product { font-weight: 650; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
-.audit-product:empty { display: none; }
-.audit-allowed { flex: none; color: var(--muted); }
-.audit-allowed.warn { flex: 1; color: #ffe0a3; }
-.audit.blocking .audit-what { display: grid; gap: 4px; margin-top: 4px; }
-.audit.blocking .audit-product { white-space: normal; font-size: 15px; }
-.audit.blocking .audit-allowed { color: var(--text); }
-.audit-code { display: none; font: 500 12.5px/1.4 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; color: var(--muted); }
-.audit.blocking .audit-code { display: block; }
-.audit-status { margin-top: 3px; font-size: 13px; color: var(--muted); }
-.audit.blocking .audit-status { margin-top: 8px; font-size: 13.5px; }
-.audit-status strong { color: var(--text); font-size: 18px; font-variant-numeric: tabular-nums; }
-.audit-shot {
-  display: block;
-  width: 100%;
-  max-height: 34dvh;
-  object-fit: contain;
-  margin-top: 10px;
-  border-radius: 10px;
-  background: #000;
-}
-.audit-choices { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 8px; margin-top: 12px; }
-.audit-choices .btn { min-height: 46px; padding: 8px 10px; font-variant-numeric: tabular-nums; }
-.audit-choices .btn small { display: block; font-size: 11px; font-weight: 500; opacity: .8; }
-.audit-choices .btn.flag { border-color: rgba(255, 204, 102, .55); color: #ffe0a3; }
-.audit-choices .btn.suggested { border-color: var(--accent); }
-.audit-other { display: flex; gap: 8px; margin-top: 10px; }
-.audit-other input {
+.audit-other, .row-edit { display: flex; align-items: center; gap: 6px; }
+.audit-other { margin-top: 7px; }
+.audit-other input, .row-edit input {
   flex: 1;
   min-width: 0;
   font: inherit;
@@ -648,12 +613,14 @@ html, body {
   background: var(--panel-2);
   border: 1px solid var(--line);
   border-radius: 10px;
-  padding: 10px 12px;
+  padding: 7px 10px;
 }
-.audit-other .btn.primary { flex: 0 0 auto; }
+.row-edit { flex: 0 1 auto; }
+.row-edit input { flex: 0 1 84px; width: 84px; }
+.row-edit .pill { padding: 7px 9px; }
 
-/* ---------- audit: reference list + results ---------- */
-.refbar {
+/* ---------- audit: status bar + results ---------- */
+.audit-bar {
   display: flex;
   align-items: center;
   gap: 12px;
@@ -663,32 +630,32 @@ html, body {
   border: 1px solid var(--line);
   border-radius: var(--radius);
 }
-.ref-info { flex: 1; min-width: 0; display: grid; gap: 2px; }
-.ref-info b { font-size: 14px; }
-.ref-info span { font-size: 12px; color: var(--muted); }
-.ref-actions { display: grid; justify-items: center; gap: 2px; }
-.btn.small { min-height: 36px; padding: 6px 12px; font-size: 13.5px; }
+.audit-info { flex: 1; min-width: 0; display: grid; gap: 2px; }
+.audit-info b { font-size: 14px; }
+.audit-info span { font-size: 12px; color: var(--muted); }
+.btn.small { flex: none; min-height: 36px; padding: 6px 12px; font-size: 13.5px; }
 .ocr-state { margin: -4px 0 12px; font-size: 12.5px; color: var(--muted); }
 .ocr-state.warn { color: #ffe0a3; }
 
-.audit-list li { cursor: default; }
-.audit-list .h-val { font: inherit; font-size: 14px; font-weight: 600; }
+.audit-list li { cursor: default; gap: 7px; }
 .mrp-chip {
   flex: none;
+  border: 0;
+  font: inherit;
   font-size: 13px;
   font-weight: 650;
   font-variant-numeric: tabular-nums;
   border-radius: 8px;
-  padding: 3px 8px;
+  padding: 5px 8px;
   background: rgba(88, 245, 200, .1);
   color: var(--accent);
 }
-.mrp-chip.warn { background: rgba(255, 204, 102, .12); color: #ffcc66; }
-.qty { flex: none; font-weight: 700; font-variant-numeric: tabular-nums; min-width: 2.2em; text-align: right; }
+button.mrp-chip { cursor: pointer; text-decoration: underline dotted; text-underline-offset: 3px; }
+.qty { flex: none; font-weight: 700; font-variant-numeric: tabular-nums; min-width: 2em; text-align: center; }
 .minus {
   flex: none;
-  width: 34px;
-  height: 34px;
+  width: 32px;
+  height: 32px;
   border: 1px solid var(--line);
   border-radius: 8px;
   background: transparent;
