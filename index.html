@@ -10,6 +10,7 @@
 <link rel="apple-touch-icon" href="icon.svg">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="mobile-web-app-capable" content="yes">
+<script src="js/isolate.js"></script>
 <link rel="manifest" href="manifest.webmanifest">
 <link rel="stylesheet" href="css/styles.css">
 </head>
@@ -78,24 +79,25 @@
       </div>
     </div>
 
-    <div class="audit" id="audit" hidden>
-      <div class="audit-card" id="auditCard" role="status" aria-live="polite">
-        <div class="audit-top">
-          <span class="audit-step" id="auditStep"></span>
-          <button type="button" class="linkbtn" id="auditCancel"></button>
-        </div>
-        <div class="audit-code" id="auditCode"></div>
-        <div class="audit-status" id="auditStatus"></div>
-        <form class="audit-other" id="auditOther" hidden>
-          <input type="text" inputmode="decimal" autocomplete="off" id="auditOtherInput" placeholder="MRP as printed, e.g. 3300" aria-label="MRP as printed on the label">
-          <button type="submit" class="pill">Save</button>
-        </form>
-        <div class="audit-actions" id="auditActions"></div>
-      </div>
-    </div>
 
     <div class="flash" id="flash" aria-hidden="true"></div>
   </main>
+
+  <div class="audit" id="audit" hidden>
+    <div class="audit-card" id="auditCard" role="status" aria-live="polite">
+      <div class="audit-top">
+        <span class="audit-step" id="auditStep"></span>
+        <button type="button" class="linkbtn" id="auditCancel"></button>
+      </div>
+      <div class="audit-code" id="auditCode"></div>
+      <div class="audit-status" id="auditStatus"></div>
+      <form class="audit-other" id="auditOther" hidden>
+        <input type="text" inputmode="decimal" autocomplete="off" id="auditOtherInput" placeholder="MRP as printed, e.g. 3300" aria-label="MRP as printed on the label">
+        <button type="submit" class="pill">Save</button>
+      </form>
+      <div class="audit-actions" id="auditActions"></div>
+    </div>
+  </div>
 
   <div class="notice" id="notice" role="status" hidden></div>
 

@@ -42,40 +42,37 @@ async function frameImage(file, crop, i) {
 }
 
 (async () => {
+  // THREADS sets the reader's threads (the live site uses up to 4 where it can);
+  // NO_EARLY=1 reads whole labels, for comparing against the early stop.
   const engine = await OcrCore.create(ort, {
     det: fs.readFileSync(path.join(vendor, 'det.onnx')),
     rec: fs.readFileSync(path.join(vendor, 'rec.onnx')),
     keys: fs.readFileSync(path.join(vendor, 'keys.txt'), 'utf8')
-  });
+  }, { intraOpNumThreads: Number(process.env.THREADS || 1), interOpNumThreads: 1 });
 
   const files = fs.readdirSync(dir).filter(f => /^\d\d_.*MRP-[\d.]+\.jpe?g$/i.test(f)).sort();
   const totals = {};
-  let wrong = 0, reads = 0, readMs = 0;
+  let wrong = 0, reads = 0, readMs = 0, products = 0, recognised = 0, found = 0;
 
   for (const f of files) {
     const truth = parseFloat(f.match(/MRP-([\d.]+)/)[1]);
     const crop = CROPS[f.slice(0, 2)];
     if (!crop) continue;
-    // OCR each frame once; how a frame is straightened does not depend on `seen`.
-    const frames = [];
-    for (let i = 0; i < Mrp.MAX_FRAMES; i++) {
-      const plan = Mrp.nextAttempt(frames);
-      const img = await frameImage(path.join(dir, f), crop, i);
-      const res = await engine.read(img, plan);
-      reads++; readMs += res.ms.total;
-      const a = Mrp.assess(res.lines, []);
-      frames.push({ lines: res.lines, found: a.found, skew: res.skew, flip: plan.flip });
-    }
-    if (process.env.DUMP) frames.forEach((fr, i) => console.log(`  [${f.slice(0, 2)} f${i} skew ${fr.skew}${fr.flip ? ' flip' : ''}]`,
-      fr.lines.map(l => `${l.text} {${l.mean.toFixed(2)}}`).join(' | ')));
-
     const scenarios = { first: [], repeat: [truth], other: [Math.round(truth * 1.06)] };
     const row = [f.slice(0, 2).padEnd(3), String(truth).padEnd(5)];
     for (const [name, seen] of Object.entries(scenarios)) {
       const got = [];
       let d = { status: 'pending' };
-      for (let i = 0; i < frames.length && d.status === 'pending'; i++) {
-        got.push(Mrp.assess(frames[i].lines, seen));
+      products++;
+      for (let i = 0; i < Mrp.MAX_FRAMES && d.status === 'pending'; i++) {
+        const plan = Mrp.nextAttempt(got);
+        const img = await frameImage(path.join(dir, f), crop, i);
+        const opts = Object.assign({}, plan, process.env.NO_EARLY ? {} : { enough: Mrp.stopRule(seen, plan.quick) });
+        const res = await engine.read(img, opts);
+        reads++; readMs += res.ms.total; recognised += res.recognised; found += res.boxes;
+        const a = Mrp.assess(res.lines, seen);
+        a.skew = res.skew; a.flip = plan.flip;
+        got.push(a);
         d = Mrp.decide(got, seen);
       }
       const right = d.value === truth;
@@ -95,5 +92,5 @@ async function frameImage(file, crop, i) {
   }
   console.log('\nby scenario:', JSON.stringify(totals));
   console.log(`wrong prices auto-accepted: ${wrong}`);
-  console.log(`OCR reads: ${reads}, average ${Math.round(readMs / reads)} ms each (this machine, native ONNX Runtime)`);
+  console.log(`one read: ${Math.round(readMs / reads)} ms, ${(recognised / reads).toFixed(1)} of ${(found / reads).toFixed(1)} lines read. Per product: ${Math.round(readMs / products)} ms over ${(reads / products).toFixed(1)} reads`);
 })().catch(e => { console.error(e); process.exit(1); });

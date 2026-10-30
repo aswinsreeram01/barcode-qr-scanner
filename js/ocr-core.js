@@ -250,7 +250,8 @@
       //   closest to it, if one is within 12°;
       // opts.avoid: angles that already failed — otherwise take the best candidate that
       //   is not within 10° of any of them;
-      // opts.flip: turn a further half-turn, for labels the estimate left upside down.
+      // opts.flip: turn a further half-turn, for labels the estimate left upside down;
+      // opts.enough(lines): called as lines come in, true stops reading the rest.
       function read(img, opts) {
         opts = opts || {};
         var t0 = Date.now();
@@ -284,21 +285,27 @@
             var x1 = Math.min(level.width, Math.ceil(b.x1 * rx)), y1 = Math.min(level.height, Math.ceil(b.y1 * ry));
             return { x0: x0, y0: y0, x1: x1, y1: y1 };
           }).filter(function (b) { return b.x1 - b.x0 > 3 && b.y1 - b.y0 > 3; });
-          var t2 = Date.now(), items = [];
+          var t2 = Date.now(), items = [], recognised = 0, stopped = false;
 
-          // Recognise one box at a time; each is a small run.
+          // Recognising takes most of the time, and a label's price lines sit near the
+          // bottom, so start there and stop as soon as the caller has what it needs.
+          boxes.sort(function (p, q) { return q.y1 - p.y1 || p.x0 - q.x0; });
           var chain = Promise.resolve();
           boxes.forEach(function (b) {
             chain = chain.then(function () {
+              if (stopped) return;
               var piece = crop(level, b.x0, b.y0, b.x1 - b.x0, b.y1 - b.y0);
               var w = Math.max(16, Math.round(REC_HEIGHT * piece.width / piece.height));
               var f = {};
               f[rec.inputNames[0]] = toTensor(ort, resize(piece, w, REC_HEIGHT));
               return rec.run(f).then(function (r) {
+                recognised++;
                 var res = decode(r[rec.outputNames[0]], keys);
                 if (!res.text) return;
                 var mean = res.conf.reduce(function (a, c) { return a + c; }, 0) / res.conf.length;
-                if (mean >= REC_MIN_CONF) items.push({ text: res.text, conf: res.conf, box: b });
+                if (mean < REC_MIN_CONF) return;
+                items.push({ text: res.text, conf: res.conf, box: b });
+                if (opts.enough && opts.enough(groupLines(items.slice()))) stopped = true;
               });
             });
           });
@@ -309,7 +316,8 @@
               candidates: cands,
               turned: turn,
               ms: { straighten: t1 - t0, detect: t2 - t1, recognise: Date.now() - t2, total: Date.now() - t0 },
-              boxes: boxes.length
+              boxes: boxes.length,
+              recognised: recognised
             };
           });
         });
